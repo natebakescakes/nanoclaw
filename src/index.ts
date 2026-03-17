@@ -225,13 +225,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        // Parse optional <reply-to id="..."/> directive — agent drops this tag
-        // anywhere to request a quoted reply. Strip it and send the rest.
-        const replyMatch = text.match(/<reply-to id="([^"]+)"\s*\/?>/);
-        if (replyMatch && channel.sendReply) {
-          const replyText = text.replace(replyMatch[0], '').replace(/<\/reply-to>/g, '').trim();
+        // Two supported reply-to forms:
+        //   Wrapping:     <reply-to id="...">content</reply-to>  → inner content only
+        //   Self-closing: <reply-to id="..."/>                   → strip tag, use rest
+        const wrapMatch = text.match(/<reply-to id="([^"]+)">([\s\S]*?)<\/reply-to>/);
+        const selfMatch = !wrapMatch ? text.match(/<reply-to id="([^"]+)"\s*\/>/) : null;
+        if (wrapMatch && channel.sendReply) {
+          const replyText = wrapMatch[2].trim();
           if (replyText) {
-            await channel.sendReply(chatJid, replyMatch[1], replyText);
+            await channel.sendReply(chatJid, wrapMatch[1], replyText);
+            outputSentToUser = true;
+          }
+        } else if (selfMatch && channel.sendReply) {
+          const replyText = text.replace(selfMatch[0], '').trim();
+          if (replyText) {
+            await channel.sendReply(chatJid, selfMatch[1], replyText);
             outputSentToUser = true;
           }
         } else {
@@ -601,7 +609,10 @@ async function main(): Promise<void> {
         delete lastAgentTimestamp[oldJid];
         saveState();
       }
-      logger.info({ oldJid, newJid, group: group?.name }, 'In-memory state updated for migrated group');
+      logger.info(
+        { oldJid, newJid, group: group?.name },
+        'In-memory state updated for migrated group',
+      );
     },
   };
 

@@ -32,7 +32,10 @@ async function sendTelegramMessage(
   api: { sendMessage: Api['sendMessage'] },
   chatId: string | number,
   text: string,
-  options: { message_thread_id?: number; reply_parameters?: { message_id: number } } = {},
+  options: {
+    message_thread_id?: number;
+    reply_parameters?: { message_id: number };
+  } = {},
 ): Promise<void> {
   try {
     await api.sendMessage(chatId, text, {
@@ -430,11 +433,8 @@ export class TelegramChannel implements Channel {
       const actorChat = (ctx.messageReaction as any).actor_chat;
       const sender =
         user?.id?.toString() || actorChat?.id?.toString() || 'anonymous';
-      const senderName =
-        user?.first_name || actorChat?.title || 'Anonymous';
-      const timestamp = new Date(
-        ctx.messageReaction.date * 1000,
-      ).toISOString();
+      const senderName = user?.first_name || actorChat?.title || 'Anonymous';
+      const timestamp = new Date(ctx.messageReaction.date * 1000).toISOString();
 
       // Persist new reactions
       for (const r of newReactions) {
@@ -451,7 +451,9 @@ export class TelegramChannel implements Channel {
 
       // Remove reactions that are no longer present
       const newEmojis = new Set(
-        newReactions.filter((r) => r.type === 'emoji').map((r) => (r as any).emoji as string),
+        newReactions
+          .filter((r) => r.type === 'emoji')
+          .map((r) => (r as any).emoji as string),
       );
       for (const r of oldReactions) {
         if (r.type === 'emoji' && !newEmojis.has((r as any).emoji)) {
@@ -541,15 +543,24 @@ export class TelegramChannel implements Channel {
       const newChatId: number | undefined = err?.parameters?.migrate_to_chat_id;
       if (err?.error_code === 400 && newChatId) {
         const newJid = `tg:${newChatId}`;
-        logger.info({ jid, newJid }, 'Group migrated, retrying with new chat ID');
+        logger.info(
+          { jid, newJid },
+          'Group migrated, retrying with new chat ID',
+        );
         try {
           await sendChunked(newChatId);
-          logger.info({ newJid, length: text.length }, 'Telegram message sent after migration');
+          logger.info(
+            { newJid, length: text.length },
+            'Telegram message sent after migration',
+          );
           // Trigger migration handler in case the event wasn't received yet
           this.opts.onGroupMigrated?.(jid, newJid);
           return;
         } catch (retryErr) {
-          logger.error({ newJid, err: retryErr }, 'Failed to send Telegram message after migration');
+          logger.error(
+            { newJid, err: retryErr },
+            'Failed to send Telegram message after migration',
+          );
           return;
         }
       }
@@ -566,7 +577,10 @@ export class TelegramChannel implements Channel {
     const numericId = jid.replace(/^tg:/, '');
     const numericMsgId = parseInt(messageId, 10);
     if (isNaN(numericMsgId)) {
-      logger.warn({ jid, messageId }, 'Invalid message ID for reply, falling back to plain send');
+      logger.warn(
+        { jid, messageId },
+        'Invalid message ID for reply, falling back to plain send',
+      );
       return this.sendMessage(jid, text);
     }
 
@@ -578,15 +592,30 @@ export class TelegramChannel implements Channel {
       if (text.length <= MAX_LENGTH) {
         await sendTelegramMessage(this.bot.api, numericId, text, replyOpts);
       } else {
-        await sendTelegramMessage(this.bot.api, numericId, text.slice(0, MAX_LENGTH), replyOpts);
+        await sendTelegramMessage(
+          this.bot.api,
+          numericId,
+          text.slice(0, MAX_LENGTH),
+          replyOpts,
+        );
         for (let i = MAX_LENGTH; i < text.length; i += MAX_LENGTH) {
-          await sendTelegramMessage(this.bot.api, numericId, text.slice(i, i + MAX_LENGTH));
+          await sendTelegramMessage(
+            this.bot.api,
+            numericId,
+            text.slice(i, i + MAX_LENGTH),
+          );
         }
       }
-      logger.info({ jid, messageId, length: text.length }, 'Telegram reply sent');
+      logger.info(
+        { jid, messageId, length: text.length },
+        'Telegram reply sent',
+      );
     } catch (err) {
       // If the original message was deleted or the reply fails, fall back to a plain message
-      logger.warn({ jid, messageId, err }, 'Telegram reply failed, falling back to plain send');
+      logger.warn(
+        { jid, messageId, err },
+        'Telegram reply failed, falling back to plain send',
+      );
       await this.sendMessage(jid, text);
     }
   }
@@ -630,7 +659,10 @@ export class TelegramChannel implements Channel {
       const numericId = parseInt(jid.replace(/^tg:/, ''), 10);
       const numericMsgId = parseInt(messageId, 10);
       if (isNaN(numericId) || isNaN(numericMsgId)) {
-        logger.warn({ jid, messageId }, 'Invalid chat or message ID for reaction');
+        logger.warn(
+          { jid, messageId },
+          'Invalid chat or message ID for reaction',
+        );
         return;
       }
       await (this.bot.api as any).setMessageReaction(numericId, numericMsgId, [
@@ -638,7 +670,10 @@ export class TelegramChannel implements Channel {
       ]);
       logger.info({ jid, messageId, emoji }, 'Telegram reaction sent');
     } catch (err) {
-      logger.error({ jid, messageId, emoji, err }, 'Failed to send Telegram reaction');
+      logger.error(
+        { jid, messageId, emoji, err },
+        'Failed to send Telegram reaction',
+      );
     }
   }
 }
