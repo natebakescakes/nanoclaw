@@ -31,7 +31,7 @@ function parseArgs(args: string[]): RegisterArgs {
     trigger: '',
     folder: '',
     channel: 'whatsapp', // backward-compat: pre-refactor installs omit --channel
-    requiresTrigger: true,
+    requiresTrigger: false,
     isMain: false,
     assistantName: 'Andy',
   };

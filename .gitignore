@@ -36,3 +36,15 @@ groups/global/*
 .nanoclaw/
 
 agents-sdk-docs
+
+# Runtime files
+nanoclaw.db
+nanoclaw.pid
+
+# One-off exploration scripts
+extract_graphql.py
+find_auth_endpoint.py
+parse_flows.py
+show_timeline.py
+graphql_queries.json
+flows

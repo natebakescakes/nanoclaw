@@ -27,9 +27,17 @@ export interface AllowedRoot {
   description?: string;
 }
 
+export interface ToolPermissions {
+  // Whitelist of MCP server names to enable (e.g., ['gmail', 'google-calendar']).
+  // If undefined or absent on the main group, all MCP servers are enabled.
+  // For non-main groups, absent means no external MCP servers.
+  mcpServers?: string[];
+}
+
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  toolPermissions?: ToolPermissions;
 }
 
 export interface RegisteredGroup {
@@ -90,6 +98,10 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  // Optional: quote-reply to a specific message (shows as a quoted reply on the platform).
+  sendReply?(jid: string, messageId: string, text: string): Promise<void>;
+  // Optional: send an emoji reaction to a specific message.
+  sendReaction?(jid: string, messageId: string, emoji: string): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

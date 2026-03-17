@@ -307,6 +307,15 @@ Use available_groups.json to find the JID for a group. The folder name must be c
     name: z.string().describe('Display name for the group'),
     folder: z.string().describe('Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")'),
     trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
+    containerConfig: z.object({
+      toolPermissions: z.object({
+        mcpServers: z.array(z.string()),
+      }).optional(),
+    }).optional().describe(
+      'Optional tool restrictions. mcpServers is a whitelist of allowed MCP servers ' +
+      '(e.g., ["google-calendar"]). Omit to allow all tools for main; non-main groups ' +
+      'with no toolPermissions get no external MCP servers by default.',
+    ),
   },
   async (args) => {
     if (!isMain) {
@@ -316,12 +325,13 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       };
     }
 
-    const data = {
+    const data: Record<string, unknown> = {
       type: 'register_group',
       jid: args.jid,
       name: args.name,
       folder: args.folder,
       trigger: args.trigger,
+      containerConfig: args.containerConfig,
       timestamp: new Date().toISOString(),
     };
 
@@ -329,6 +339,38 @@ Use available_groups.json to find the JID for a group. The folder name must be c
 
     return {
       content: [{ type: 'text' as const, text: `Group "${args.name}" registered. It will start receiving messages immediately.` }],
+    };
+  },
+);
+
+server.tool(
+  'react_to_message',
+  `Send an emoji reaction to a specific message in the current chat. Telegram only — the reaction appears on the message for all participants. Use message IDs from the conversation context (e.g. the numeric ID shown in [Reaction: ... to message <id>] events or from inbound message IDs).`,
+  {
+    message_id: z.string().describe('The message ID to react to (numeric string)'),
+    emoji: z.string().describe('The emoji to react with (e.g. "👍", "❤️", "🔥")'),
+  },
+  async (args) => {
+    if (!chatJid.startsWith('tg:')) {
+      return {
+        content: [{ type: 'text' as const, text: 'Reactions are only supported on Telegram chats.' }],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'reaction',
+      chatJid,
+      messageId: args.message_id,
+      emoji: args.emoji,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Reaction ${args.emoji} sent to message ${args.message_id}.` }],
     };
   },
 );

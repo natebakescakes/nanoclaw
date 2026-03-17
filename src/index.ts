@@ -6,6 +6,7 @@ import {
   CREDENTIAL_PROXY_PORT,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
+  TELEGRAM_BOT_POOL,
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
@@ -45,6 +46,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
+import { initBotPool } from './channels/telegram.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   restoreRemoteControl,
@@ -223,8 +225,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+        // Parse optional <reply-to id="..."/> directive — agent drops this tag
+        // anywhere to request a quoted reply. Strip it and send the rest.
+        const replyMatch = text.match(/<reply-to id="([^"]+)"\s*\/?>/);
+        if (replyMatch && channel.sendReply) {
+          const replyText = text.replace(replyMatch[0], '').replace(/<\/reply-to>/g, '').trim();
+          if (replyText) {
+            await channel.sendReply(chatJid, replyMatch[1], replyText);
+            outputSentToUser = true;
+          }
+        } else {
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+        }
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -320,6 +333,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        toolPermissions: group.containerConfig?.toolPermissions,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -574,6 +588,21 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    onGroupMigrated: (oldJid: string, newJid: string) => {
+      // DB already updated by migrateGroupJid — sync in-memory state
+      const group = registeredGroups[oldJid];
+      if (group) {
+        registeredGroups[newJid] = group;
+        delete registeredGroups[oldJid];
+      }
+      // Transfer agent cursor so the new JID doesn't replay old messages
+      if (lastAgentTimestamp[oldJid]) {
+        lastAgentTimestamp[newJid] = lastAgentTimestamp[oldJid];
+        delete lastAgentTimestamp[oldJid];
+        saveState();
+      }
+      logger.info({ oldJid, newJid, group: group?.name }, 'In-memory state updated for migrated group');
+    },
   };
 
   // Create and connect all registered channels.
@@ -595,6 +624,10 @@ async function main(): Promise<void> {
   if (channels.length === 0) {
     logger.fatal('No channels connected');
     process.exit(1);
+  }
+
+  if (TELEGRAM_BOT_POOL.length > 0) {
+    await initBotPool(TELEGRAM_BOT_POOL);
   }
 
   // Start subsystems (independently of connection handler)
@@ -619,6 +652,14 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
+    },
+    sendReaction: (jid, messageId, emoji) => {
+      const channel = findChannel(channels, jid);
+      if (!channel?.sendReaction) {
+        logger.warn({ jid }, 'Channel does not support reactions');
+        return Promise.resolve();
+      }
+      return channel.sendReaction(jid, messageId, emoji);
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

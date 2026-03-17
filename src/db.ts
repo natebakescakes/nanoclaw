@@ -139,6 +139,19 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+
+  // Reactions table (idempotent — safe to run on existing DBs)
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS reactions (
+      message_id TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      sender TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      PRIMARY KEY (message_id, chat_jid, sender, emoji)
+    );
+    CREATE INDEX IF NOT EXISTS idx_reactions_chat ON reactions(chat_jid, timestamp);
+  `);
 }
 
 export function initDatabase(): void {
@@ -632,6 +645,72 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+// --- Group JID migration ---
+
+/**
+ * Migrate all DB rows from oldJid to newJid (used when a Telegram basic group
+ * upgrades to a supergroup and gets a new chat ID).
+ */
+export function migrateGroupJid(oldJid: string, newJid: string): void {
+  // Insert new chat row (copy from old)
+  db.prepare(
+    `INSERT OR IGNORE INTO chats (jid, name, last_message_time, channel, is_group)
+     SELECT ?, name, last_message_time, channel, is_group FROM chats WHERE jid = ?`,
+  ).run(newJid, oldJid);
+
+  db.prepare('UPDATE messages SET chat_jid = ? WHERE chat_jid = ?').run(newJid, oldJid);
+  db.prepare('UPDATE reactions SET chat_jid = ? WHERE chat_jid = ?').run(newJid, oldJid);
+  db.prepare('UPDATE scheduled_tasks SET chat_jid = ? WHERE chat_jid = ?').run(newJid, oldJid);
+  db.prepare('UPDATE registered_groups SET jid = ? WHERE jid = ?').run(newJid, oldJid);
+
+  db.prepare('DELETE FROM chats WHERE jid = ?').run(oldJid);
+}
+
+// --- Reaction accessors ---
+
+export interface Reaction {
+  message_id: string;
+  chat_jid: string;
+  sender: string;
+  emoji: string;
+  timestamp: string;
+}
+
+export function storeReaction(reaction: Reaction): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO reactions (message_id, chat_jid, sender, emoji, timestamp)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    reaction.message_id,
+    reaction.chat_jid,
+    reaction.sender,
+    reaction.emoji,
+    reaction.timestamp,
+  );
+}
+
+export function removeReaction(
+  messageId: string,
+  chatJid: string,
+  sender: string,
+  emoji: string,
+): void {
+  db.prepare(
+    `DELETE FROM reactions WHERE message_id = ? AND chat_jid = ? AND sender = ? AND emoji = ?`,
+  ).run(messageId, chatJid, sender, emoji);
+}
+
+export function getReactionsForMessage(
+  messageId: string,
+  chatJid: string,
+): Reaction[] {
+  return db
+    .prepare(
+      `SELECT * FROM reactions WHERE message_id = ? AND chat_jid = ? ORDER BY timestamp`,
+    )
+    .all(messageId, chatJid) as Reaction[];
 }
 
 // --- JSON migration ---

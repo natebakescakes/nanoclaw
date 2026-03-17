@@ -13,6 +13,8 @@ import {
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
+  GOOGLE_TASKS_CLIENT_ID,
+  GOOGLE_TASKS_CLIENT_SECRET,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   TIMEZONE,
@@ -28,7 +30,7 @@ import {
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { validateAdditionalMounts } from './mount-security.js';
-import { RegisteredGroup } from './types.js';
+import { RegisteredGroup, ToolPermissions } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -42,6 +44,7 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  toolPermissions?: ToolPermissions;
 }
 
 export interface ContainerOutput {
@@ -57,9 +60,15 @@ interface VolumeMount {
   readonly: boolean;
 }
 
+function isMcpAllowed(name: string, isMain: boolean, perms?: ToolPermissions): boolean {
+  if (isMain) return true;
+  return (perms?.mcpServers ?? []).includes(name);
+}
+
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  toolPermissions?: ToolPermissions,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
@@ -101,18 +110,27 @@ function buildVolumeMounts(
       containerPath: '/workspace/group',
       readonly: false,
     });
-
-    // Global memory directory (read-only for non-main)
-    // Only directory mounts are supported, not file mounts
-    const globalDir = path.join(GROUPS_DIR, 'global');
-    if (fs.existsSync(globalDir)) {
-      mounts.push({
-        hostPath: globalDir,
-        containerPath: '/workspace/global',
-        readonly: true,
-      });
-    }
   }
+
+  // Global memory directory (read-only for all groups)
+  const globalDir = path.join(GROUPS_DIR, 'global');
+  if (fs.existsSync(globalDir)) {
+    mounts.push({
+      hostPath: globalDir,
+      containerPath: '/workspace/global',
+      readonly: true,
+    });
+  }
+
+  // Shared household knowledge base (writable for all groups)
+  // Agents build and maintain this collaboratively — no host intervention needed.
+  const kbDir = path.join(DATA_DIR, 'kb');
+  fs.mkdirSync(kbDir, { recursive: true });
+  mounts.push({
+    hostPath: kbDir,
+    containerPath: '/workspace/kb',
+    readonly: false,
+  });
 
   // Per-group Claude sessions directory (isolated from other groups)
   // Each group gets their own .claude/ to prevent cross-group session access
@@ -164,14 +182,96 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Gmail credentials directory (for Gmail MCP inside the container)
   const homeDir = os.homedir();
-  const gmailDir = path.join(homeDir, '.gmail-mcp');
-  if (fs.existsSync(gmailDir)) {
+
+  // Gmail credentials directory (for Gmail MCP inside the container)
+  if (isMcpAllowed('gmail', isMain, toolPermissions)) {
+    const gmailDir = path.join(homeDir, '.gmail-mcp');
+    if (fs.existsSync(gmailDir)) {
+      mounts.push({
+        hostPath: gmailDir,
+        containerPath: '/home/node/.gmail-mcp',
+        readonly: false, // MCP may need to refresh OAuth tokens
+      });
+    }
+  }
+
+  // Google Calendar credentials directory (for Calendar MCP inside the container)
+  if (isMcpAllowed('google-calendar', isMain, toolPermissions)) {
+    const gcalDir = path.join(homeDir, '.gcal-mcp');
+    fs.mkdirSync(gcalDir, { recursive: true });
     mounts.push({
-      hostPath: gmailDir,
-      containerPath: '/home/node/.gmail-mcp',
+      hostPath: gcalDir,
+      containerPath: '/home/node/.gcal-mcp',
       readonly: false, // MCP may need to refresh OAuth tokens
+    });
+
+    // Google Calendar token storage (separate from credentials)
+    const gcalTokenDir = path.join(homeDir, '.config', 'google-calendar-mcp');
+    fs.mkdirSync(gcalTokenDir, { recursive: true });
+    mounts.push({
+      hostPath: gcalTokenDir,
+      containerPath: '/home/node/.config/google-calendar-mcp',
+      readonly: false,
+    });
+  }
+
+  // LittleLives MCP — mount config + mcp script (read-only, token stored on host)
+  if (isMcpAllowed('littlelives', isMain, toolPermissions)) {
+    const llDir = path.join(homeDir, '.littlelives');
+    if (fs.existsSync(llDir)) {
+      mounts.push({
+        hostPath: llDir,
+        containerPath: '/home/node/.littlelives',
+        readonly: true,
+      });
+    }
+  }
+
+  // YNAB MCP — mount config + mcp script (read-only, token stored on host)
+  if (isMcpAllowed('ynab', isMain, toolPermissions)) {
+    const ynabDir = path.join(homeDir, '.ynab');
+    if (fs.existsSync(ynabDir)) {
+      mounts.push({
+        hostPath: ynabDir,
+        containerPath: '/home/node/.ynab',
+        readonly: true,
+      });
+    }
+  }
+
+  // Trakt MCP — writable so token refresh can be persisted back to host
+  if (isMcpAllowed('trakt', isMain, toolPermissions)) {
+    const traktDir = path.join(homeDir, '.trakt');
+    if (fs.existsSync(traktDir)) {
+      mounts.push({
+        hostPath: traktDir,
+        containerPath: '/home/node/.trakt',
+        readonly: false,
+      });
+    }
+  }
+
+  // IBKR MCP — read-only (no auth tokens to refresh; gateway handles auth)
+  if (isMcpAllowed('ibkr', isMain, toolPermissions)) {
+    const ibkrDir = path.join(homeDir, '.ibkr');
+    if (fs.existsSync(ibkrDir)) {
+      mounts.push({
+        hostPath: ibkrDir,
+        containerPath: '/home/node/.ibkr',
+        readonly: true,
+      });
+    }
+  }
+
+  // Google Tasks credentials directory
+  if (isMcpAllowed('google-tasks-vrob', isMain, toolPermissions)) {
+    const gtasksTokenDir = path.join(homeDir, '.config', 'mcp-googletasks-vrob');
+    fs.mkdirSync(gtasksTokenDir, { recursive: true });
+    mounts.push({
+      hostPath: gtasksTokenDir,
+      containerPath: '/home/node/.config/mcp-googletasks-vrob',
+      readonly: false,
     });
   }
 
@@ -205,6 +305,13 @@ function buildVolumeMounts(
   if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
     fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
   }
+  // Always sync index.ts so core permission logic stays up to date
+  if (fs.existsSync(agentRunnerSrc)) {
+    fs.cpSync(
+      path.join(agentRunnerSrc, 'index.ts'),
+      path.join(groupAgentRunnerDir, 'index.ts'),
+    );
+  }
   mounts.push({
     hostPath: groupAgentRunnerDir,
     containerPath: '/app/src',
@@ -232,6 +339,10 @@ function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Google Tasks MCP credentials (injected from host .env, never hardcoded)
+  if (GOOGLE_TASKS_CLIENT_ID) args.push('-e', `GOOGLE_TASKS_CLIENT_ID=${GOOGLE_TASKS_CLIENT_ID}`);
+  if (GOOGLE_TASKS_CLIENT_SECRET) args.push('-e', `GOOGLE_TASKS_CLIENT_SECRET=${GOOGLE_TASKS_CLIENT_SECRET}`);
 
   // Route API traffic through the credential proxy (containers never see real secrets)
   args.push(
@@ -287,7 +398,7 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const mounts = buildVolumeMounts(group, input.isMain, group.containerConfig?.toolPermissions);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);

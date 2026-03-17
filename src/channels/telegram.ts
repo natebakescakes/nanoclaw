@@ -1,9 +1,13 @@
+import { unlink } from 'fs/promises';
 import https from 'https';
+
 import { Api, Bot } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
+import { migrateGroupJid, removeReaction, storeReaction } from '../db.js';
 import { logger } from '../logger.js';
+import { downloadTelegramFile, transcribeAudio } from '../whisper.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -16,6 +20,7 @@ export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  onGroupMigrated?: (oldJid: string, newJid: string) => void;
 }
 
 /**
@@ -27,7 +32,7 @@ async function sendTelegramMessage(
   api: { sendMessage: Api['sendMessage'] },
   chatId: string | number,
   text: string,
-  options: { message_thread_id?: number } = {},
+  options: { message_thread_id?: number; reply_parameters?: { message_id: number } } = {},
 ): Promise<void> {
   try {
     await api.sendMessage(chatId, text, {
@@ -38,6 +43,97 @@ async function sendTelegramMessage(
     // Fallback: send as plain text if Markdown parsing fails
     logger.debug({ err }, 'Markdown send failed, falling back to plain text');
     await api.sendMessage(chatId, text, options);
+  }
+}
+
+// Bot pool for agent teams: send-only Api instances (no polling)
+const poolApis: Api[] = [];
+// Maps "{groupFolder}:{senderName}" → pool Api index for stable assignment
+const senderBotMap = new Map<string, number>();
+let nextPoolIndex = 0;
+
+/**
+ * Initialize send-only Api instances for the bot pool.
+ * Each pool bot can send messages but doesn't poll for updates.
+ */
+export async function initBotPool(tokens: string[]): Promise<void> {
+  for (const token of tokens) {
+    try {
+      const api = new Api(token);
+      const me = await api.getMe();
+      poolApis.push(api);
+      logger.info(
+        { username: me.username, id: me.id, poolSize: poolApis.length },
+        'Pool bot initialized',
+      );
+    } catch (err) {
+      logger.error({ err }, 'Failed to initialize pool bot');
+    }
+  }
+  if (poolApis.length > 0) {
+    logger.info({ count: poolApis.length }, 'Telegram bot pool ready');
+  }
+}
+
+/**
+ * Send a message via a pool bot assigned to the given sender name.
+ * Assigns bots round-robin on first use; subsequent messages from the
+ * same sender in the same group always use the same bot.
+ * On first assignment, renames the bot to match the sender's role.
+ */
+export async function sendPoolMessage(
+  chatId: string,
+  text: string,
+  sender: string,
+  groupFolder: string,
+): Promise<void> {
+  if (poolApis.length === 0) {
+    logger.warn('No pool bots available, falling back to main bot');
+    return;
+  }
+
+  const key = `${groupFolder}:${sender}`;
+  let idx = senderBotMap.get(key);
+  if (idx === undefined) {
+    idx = nextPoolIndex % poolApis.length;
+    nextPoolIndex++;
+    senderBotMap.set(key, idx);
+    try {
+      await poolApis[idx].setMyName(sender);
+      await new Promise((r) => setTimeout(r, 2000));
+      logger.info(
+        { sender, groupFolder, poolIndex: idx },
+        'Assigned and renamed pool bot',
+      );
+    } catch (err) {
+      logger.warn(
+        { sender, err },
+        'Failed to rename pool bot (sending anyway)',
+      );
+    }
+  }
+
+  const api = poolApis[idx];
+  try {
+    const numericId = chatId.replace(/^tg:/, '');
+    const MAX_LENGTH = 4096;
+    if (text.length <= MAX_LENGTH) {
+      await sendTelegramMessage(api, numericId, text);
+    } else {
+      for (let i = 0; i < text.length; i += MAX_LENGTH) {
+        await sendTelegramMessage(
+          api,
+          numericId,
+          text.slice(i, i + MAX_LENGTH),
+        );
+      }
+    }
+    logger.info(
+      { chatId, sender, poolIndex: idx, length: text.length },
+      'Pool message sent',
+    );
+  } catch (err) {
+    logger.error({ chatId, sender, err }, 'Failed to send pool message');
   }
 }
 
@@ -106,6 +202,17 @@ export class TelegramChannel implements Channel {
         ctx.chat.type === 'private'
           ? senderName
           : (ctx.chat as any).title || chatJid;
+
+      // If the user is replying to another message, prepend the quoted context
+      // so the agent understands what the reply is about.
+      if (ctx.message.reply_to_message) {
+        const quoted = ctx.message.reply_to_message as any;
+        const quotedSender =
+          quoted.from?.first_name || quoted.from?.username || 'Unknown';
+        const quotedText =
+          quoted.text || quoted.caption || '[non-text message]';
+        content = `[In reply to ${quotedSender}: "${quotedText}"]\n${content}`;
+      }
 
       // Translate Telegram @bot_username mentions into TRIGGER_PATTERN format.
       // Telegram @mentions (e.g., @andy_ai_bot) won't match TRIGGER_PATTERN
@@ -179,6 +286,17 @@ export class TelegramChannel implements Channel {
         'Unknown';
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
 
+      // Prepend reply context if available
+      let replyPrefix = '';
+      if (ctx.message.reply_to_message) {
+        const quoted = ctx.message.reply_to_message;
+        const quotedSender =
+          quoted.from?.first_name || quoted.from?.username || 'Unknown';
+        const quotedText =
+          quoted.text || quoted.caption || '[non-text message]';
+        replyPrefix = `[In reply to ${quotedSender}: "${quotedText}"]\n`;
+      }
+
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
       this.opts.onChatMetadata(
@@ -193,7 +311,7 @@ export class TelegramChannel implements Channel {
         chat_jid: chatJid,
         sender: ctx.from?.id?.toString() || '',
         sender_name: senderName,
-        content: `${placeholder}${caption}`,
+        content: `${replyPrefix}${placeholder}${caption}`,
         timestamp,
         is_from_me: false,
       });
@@ -201,7 +319,78 @@ export class TelegramChannel implements Channel {
 
     this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
-    this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
+    this.bot.on('message:voice', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+
+      // Prepend reply context if available
+      let replyPrefix = '';
+      if ((ctx.message as any).reply_to_message) {
+        const quoted = (ctx.message as any).reply_to_message;
+        const quotedSender =
+          quoted.from?.first_name || quoted.from?.username || 'Unknown';
+        const quotedText =
+          quoted.text || quoted.caption || '[non-text message]';
+        replyPrefix = `[In reply to ${quotedSender}: "${quotedText}"]\n`;
+      }
+
+      // Attempt transcription; fall back to placeholder on any error
+      let content = `${replyPrefix}[Voice message]${caption}`;
+      try {
+        const fileInfo = await ctx.api.getFile(ctx.message.voice.file_id);
+        if (fileInfo.file_path) {
+          const tmpFile = await downloadTelegramFile(
+            this.botToken,
+            fileInfo.file_path,
+          );
+          if (tmpFile) {
+            try {
+              const transcription = await transcribeAudio(tmpFile);
+              if (transcription) {
+                content = `${replyPrefix}[Voice message]: ${transcription}${caption}`;
+                logger.info(
+                  { chatJid, chars: transcription.length },
+                  'Voice message transcribed',
+                );
+              }
+            } finally {
+              await unlink(tmpFile).catch(() => {});
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn({ err }, 'Voice transcription failed, using placeholder');
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+      });
+    });
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
     this.bot.on('message:document', (ctx) => {
       const name = ctx.message.document?.file_name || 'file';
@@ -214,6 +403,89 @@ export class TelegramChannel implements Channel {
     this.bot.on('message:location', (ctx) => storeNonText(ctx, '[Location]'));
     this.bot.on('message:contact', (ctx) => storeNonText(ctx, '[Contact]'));
 
+    // Detect basic group → supergroup migration
+    this.bot.on('message:migrate_to_chat_id', (ctx) => {
+      const oldJid = `tg:${ctx.chat.id}`;
+      const newJid = `tg:${ctx.message.migrate_to_chat_id}`;
+      logger.info({ oldJid, newJid }, 'Telegram group migrated to supergroup');
+      try {
+        migrateGroupJid(oldJid, newJid);
+        this.opts.onGroupMigrated?.(oldJid, newJid);
+        logger.info({ oldJid, newJid }, 'Group migration complete');
+      } catch (err) {
+        logger.error({ oldJid, newJid, err }, 'Group migration failed');
+      }
+    });
+
+    // Handle emoji reactions (Bot API 7.0+)
+    this.bot.on('message_reaction', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const messageId = ctx.messageReaction.message_id.toString();
+      const newReactions = ctx.messageReaction.new_reaction;
+      const oldReactions = ctx.messageReaction.old_reaction;
+      const user = ctx.messageReaction.user;
+      const actorChat = (ctx.messageReaction as any).actor_chat;
+      const sender =
+        user?.id?.toString() || actorChat?.id?.toString() || 'anonymous';
+      const senderName =
+        user?.first_name || actorChat?.title || 'Anonymous';
+      const timestamp = new Date(
+        ctx.messageReaction.date * 1000,
+      ).toISOString();
+
+      // Persist new reactions
+      for (const r of newReactions) {
+        if (r.type === 'emoji') {
+          storeReaction({
+            message_id: messageId,
+            chat_jid: chatJid,
+            sender,
+            emoji: r.emoji,
+            timestamp,
+          });
+        }
+      }
+
+      // Remove reactions that are no longer present
+      const newEmojis = new Set(
+        newReactions.filter((r) => r.type === 'emoji').map((r) => (r as any).emoji as string),
+      );
+      for (const r of oldReactions) {
+        if (r.type === 'emoji' && !newEmojis.has((r as any).emoji)) {
+          removeReaction(messageId, chatJid, sender, (r as any).emoji);
+        }
+      }
+
+      // Deliver reaction to agent as a message so it's visible in context
+      const emojis = newReactions
+        .filter((r) => r.type === 'emoji')
+        .map((r) => (r as any).emoji as string)
+        .join('');
+      if (emojis) {
+        this.opts.onMessage(chatJid, {
+          id: `reaction-${messageId}-${sender}-${Date.now()}`,
+          chat_jid: chatJid,
+          sender,
+          sender_name: senderName,
+          content: `[Reaction: ${emojis} to message ${messageId}]`,
+          timestamp,
+          is_from_me: false,
+        });
+        logger.info(
+          { chatJid, messageId, sender: senderName, emojis },
+          'Telegram reaction received',
+        );
+      } else {
+        logger.debug(
+          { chatJid, messageId, sender: senderName },
+          'Telegram reaction removed',
+        );
+      }
+    });
+
     // Handle errors gracefully
     this.bot.catch((err) => {
       logger.error({ err: err.message }, 'Telegram bot error');
@@ -222,6 +494,7 @@ export class TelegramChannel implements Channel {
     // Start polling — returns a Promise that resolves when started
     return new Promise<void>((resolve) => {
       this.bot!.start({
+        allowed_updates: ['message', 'message_reaction'] as any,
         onStart: (botInfo) => {
           logger.info(
             { username: botInfo.username, id: botInfo.id },
@@ -243,25 +516,78 @@ export class TelegramChannel implements Channel {
       return;
     }
 
-    try {
-      const numericId = jid.replace(/^tg:/, '');
-
-      // Telegram has a 4096 character limit per message — split if needed
+    const sendChunked = async (chatId: string | number) => {
       const MAX_LENGTH = 4096;
       if (text.length <= MAX_LENGTH) {
-        await sendTelegramMessage(this.bot.api, numericId, text);
+        await sendTelegramMessage(this.bot!.api, chatId, text);
       } else {
         for (let i = 0; i < text.length; i += MAX_LENGTH) {
           await sendTelegramMessage(
-            this.bot.api,
-            numericId,
+            this.bot!.api,
+            chatId,
             text.slice(i, i + MAX_LENGTH),
           );
         }
       }
+    };
+
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      await sendChunked(numericId);
       logger.info({ jid, length: text.length }, 'Telegram message sent');
-    } catch (err) {
+    } catch (err: any) {
+      // Group was upgraded to supergroup mid-flight — retry with the new chat ID
+      // that Telegram returns in the error parameters.
+      const newChatId: number | undefined = err?.parameters?.migrate_to_chat_id;
+      if (err?.error_code === 400 && newChatId) {
+        const newJid = `tg:${newChatId}`;
+        logger.info({ jid, newJid }, 'Group migrated, retrying with new chat ID');
+        try {
+          await sendChunked(newChatId);
+          logger.info({ newJid, length: text.length }, 'Telegram message sent after migration');
+          // Trigger migration handler in case the event wasn't received yet
+          this.opts.onGroupMigrated?.(jid, newJid);
+          return;
+        } catch (retryErr) {
+          logger.error({ newJid, err: retryErr }, 'Failed to send Telegram message after migration');
+          return;
+        }
+      }
       logger.error({ jid, err }, 'Failed to send Telegram message');
+    }
+  }
+
+  async sendReply(jid: string, messageId: string, text: string): Promise<void> {
+    if (!this.bot) {
+      logger.warn('Telegram bot not initialized');
+      return;
+    }
+
+    const numericId = jid.replace(/^tg:/, '');
+    const numericMsgId = parseInt(messageId, 10);
+    if (isNaN(numericMsgId)) {
+      logger.warn({ jid, messageId }, 'Invalid message ID for reply, falling back to plain send');
+      return this.sendMessage(jid, text);
+    }
+
+    const replyOpts = { reply_parameters: { message_id: numericMsgId } };
+    const MAX_LENGTH = 4096;
+
+    try {
+      // Only the first chunk carries the reply reference; subsequent chunks are follow-ups
+      if (text.length <= MAX_LENGTH) {
+        await sendTelegramMessage(this.bot.api, numericId, text, replyOpts);
+      } else {
+        await sendTelegramMessage(this.bot.api, numericId, text.slice(0, MAX_LENGTH), replyOpts);
+        for (let i = MAX_LENGTH; i < text.length; i += MAX_LENGTH) {
+          await sendTelegramMessage(this.bot.api, numericId, text.slice(i, i + MAX_LENGTH));
+        }
+      }
+      logger.info({ jid, messageId, length: text.length }, 'Telegram reply sent');
+    } catch (err) {
+      // If the original message was deleted or the reply fails, fall back to a plain message
+      logger.warn({ jid, messageId, err }, 'Telegram reply failed, falling back to plain send');
+      await this.sendMessage(jid, text);
     }
   }
 
@@ -288,6 +614,31 @@ export class TelegramChannel implements Channel {
       await this.bot.api.sendChatAction(numericId, 'typing');
     } catch (err) {
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
+    }
+  }
+
+  async sendReaction(
+    jid: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<void> {
+    if (!this.bot) {
+      logger.warn('Telegram bot not initialized');
+      return;
+    }
+    try {
+      const numericId = parseInt(jid.replace(/^tg:/, ''), 10);
+      const numericMsgId = parseInt(messageId, 10);
+      if (isNaN(numericId) || isNaN(numericMsgId)) {
+        logger.warn({ jid, messageId }, 'Invalid chat or message ID for reaction');
+        return;
+      }
+      await (this.bot.api as any).setMessageReaction(numericId, numericMsgId, [
+        { type: 'emoji', emoji },
+      ]);
+      logger.info({ jid, messageId, emoji }, 'Telegram reaction sent');
+    } catch (err) {
+      logger.error({ jid, messageId, emoji, err }, 'Failed to send Telegram reaction');
     }
   }
 }

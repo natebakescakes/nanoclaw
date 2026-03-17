@@ -19,6 +19,10 @@ import path from 'path';
 import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 
+interface ToolPermissions {
+  mcpServers?: string[];
+}
+
 interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -27,6 +31,7 @@ interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  toolPermissions?: ToolPermissions;
 }
 
 interface ContainerOutput {
@@ -324,6 +329,15 @@ function waitForIpcMessage(): Promise<string | null> {
 }
 
 /**
+ * Check if an MCP server is allowed for the given container input.
+ * Main group always gets all servers; non-main must explicitly opt in via toolPermissions.
+ */
+function mcpAllowed(name: string, containerInput: ContainerInput): boolean {
+  if (containerInput.isMain) return true;
+  return (containerInput.toolPermissions?.mcpServers ?? []).includes(name);
+}
+
+/**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
  * allowing agent teams subagents to run to completion.
@@ -369,7 +383,7 @@ async function runQuery(
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
-  if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
+  if (fs.existsSync(globalClaudeMdPath)) {
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
   }
 
@@ -408,7 +422,13 @@ async function runQuery(
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
-        'mcp__gmail__*',
+        ...(mcpAllowed('gmail', containerInput) ? ['mcp__gmail__*'] : []),
+        ...(mcpAllowed('google-calendar', containerInput) ? ['mcp__google-calendar__*'] : []),
+        ...(mcpAllowed('google-tasks-vrob', containerInput) ? ['mcp__google-tasks-vrob__*'] : []),
+        ...(mcpAllowed('littlelives', containerInput) ? ['mcp__littlelives__*'] : []),
+        ...(mcpAllowed('ynab', containerInput) ? ['mcp__ynab__*'] : []),
+        ...(mcpAllowed('trakt', containerInput) ? ['mcp__trakt__*'] : []),
+        ...(mcpAllowed('ibkr', containerInput) ? ['mcp__ibkr__*'] : []),
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -424,10 +444,55 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
-        gmail: {
-          command: 'npx',
-          args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
-        },
+        ...(mcpAllowed('gmail', containerInput) ? {
+          gmail: {
+            command: 'npx',
+            args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
+          },
+        } : {}),
+        ...(mcpAllowed('google-calendar', containerInput) ? {
+          'google-calendar': {
+            command: 'npx',
+            args: ['-y', '@cocal/google-calendar-mcp'],
+            env: {
+              GOOGLE_OAUTH_CREDENTIALS: '/home/node/.gcal-mcp/gcp-oauth.keys.json',
+            },
+          },
+        } : {}),
+        ...(mcpAllowed('google-tasks-vrob', containerInput) ? {
+          'google-tasks-vrob': {
+            command: 'npx',
+            args: ['-y', 'mcp-googletasks-vrob'],
+            env: {
+              GOOGLE_CLIENT_ID: process.env.GOOGLE_TASKS_CLIENT_ID ?? '',
+              GOOGLE_CLIENT_SECRET: process.env.GOOGLE_TASKS_CLIENT_SECRET ?? '',
+            },
+          },
+        } : {}),
+        ...(mcpAllowed('littlelives', containerInput) ? {
+          littlelives: {
+            command: 'node',
+            args: ['/home/node/.littlelives/mcp.js'],
+          },
+        } : {}),
+        ...(mcpAllowed('ynab', containerInput) ? {
+          ynab: {
+            command: 'node',
+            args: ['/home/node/.ynab/mcp.js'],
+          },
+        } : {}),
+        ...(mcpAllowed('trakt', containerInput) ? {
+          trakt: {
+            command: 'node',
+            args: ['/home/node/.trakt/mcp.js'],
+          },
+        } : {}),
+        ...(mcpAllowed('ibkr', containerInput) ? {
+          ibkr: {
+            command: 'node',
+            args: ['/home/node/.ibkr/mcp.js'],
+          },
+        } : {}),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
@@ -461,6 +526,11 @@ async function runQuery(
         result: textResult || null,
         newSessionId
       });
+      // End the stream after each result so the query finishes cleanly.
+      // The main loop will restart runQuery() for the next message, giving
+      // fresh MCP server connections and preventing tool dropout in long sessions.
+      ipcPolling = false;
+      stream.end();
     }
   }
 
