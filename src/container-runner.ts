@@ -295,7 +295,7 @@ function buildVolumeMounts(
 
   // Notion MCP — mcp-remote token storage (writable so OAuth tokens persist across restarts)
   if (isMcpAllowed('notion', isMain, toolPermissions)) {
-    const notionMcpAuthDir = path.join(homeDir, '.notion-mcp-auth');
+    const notionMcpAuthDir = path.join(homeDir, `.notion-mcp-auth${instanceSuffix}`);
     fs.mkdirSync(notionMcpAuthDir, { recursive: true });
     mounts.push({
       hostPath: notionMcpAuthDir,
