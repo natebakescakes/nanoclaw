@@ -429,6 +429,7 @@ async function runQuery(
         ...(mcpAllowed('ynab', containerInput) ? ['mcp__ynab__*'] : []),
         ...(mcpAllowed('trakt', containerInput) ? ['mcp__trakt__*'] : []),
         ...(mcpAllowed('ibkr', containerInput) ? ['mcp__ibkr__*'] : []),
+        ...(mcpAllowed('notion', containerInput) ? ['mcp__notion__*'] : []),
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -456,6 +457,7 @@ async function runQuery(
             args: ['-y', '@cocal/google-calendar-mcp'],
             env: {
               GOOGLE_OAUTH_CREDENTIALS: '/home/node/.gcal-mcp/gcp-oauth.keys.json',
+              GOOGLE_CALENDAR_MCP_TOKEN_PATH: '/home/node/.config/google-calendar-mcp/tokens.json',
             },
           },
         } : {}),
@@ -491,6 +493,12 @@ async function runQuery(
           ibkr: {
             command: 'node',
             args: ['/home/node/.ibkr/mcp.js'],
+          },
+        } : {}),
+        ...(mcpAllowed('notion', containerInput) ? {
+          notion: {
+            command: 'npx',
+            args: ['-y', 'mcp-remote', 'https://mcp.notion.com/mcp'],
           },
         } : {}),
       },

@@ -184,9 +184,18 @@ function buildVolumeMounts(
 
   const homeDir = os.homedir();
 
+  // Derive an instance-specific suffix from the project directory name so that
+  // multiple NanoClaw installs on the same host use separate credential dirs.
+  // e.g. "nanoclaw" → "" (default, no suffix), "nanoclaw-multiplier" → "-multiplier"
+  const instanceSuffix = (() => {
+    const dirName = path.basename(projectRoot);
+    const stripped = dirName.replace(/^nanoclaw-?/, '');
+    return stripped ? `-${stripped}` : '';
+  })();
+
   // Gmail credentials directory (for Gmail MCP inside the container)
   if (isMcpAllowed('gmail', isMain, toolPermissions)) {
-    const gmailDir = path.join(homeDir, '.gmail-mcp');
+    const gmailDir = path.join(homeDir, `.gmail-mcp${instanceSuffix}`);
     if (fs.existsSync(gmailDir)) {
       mounts.push({
         hostPath: gmailDir,
@@ -198,7 +207,7 @@ function buildVolumeMounts(
 
   // Google Calendar credentials directory (for Calendar MCP inside the container)
   if (isMcpAllowed('google-calendar', isMain, toolPermissions)) {
-    const gcalDir = path.join(homeDir, '.gcal-mcp');
+    const gcalDir = path.join(homeDir, `.gcal-mcp${instanceSuffix}`);
     fs.mkdirSync(gcalDir, { recursive: true });
     mounts.push({
       hostPath: gcalDir,
@@ -207,7 +216,7 @@ function buildVolumeMounts(
     });
 
     // Google Calendar token storage (separate from credentials)
-    const gcalTokenDir = path.join(homeDir, '.config', 'google-calendar-mcp');
+    const gcalTokenDir = path.join(homeDir, '.config', `google-calendar-mcp${instanceSuffix}`);
     fs.mkdirSync(gcalTokenDir, { recursive: true });
     mounts.push({
       hostPath: gcalTokenDir,
@@ -264,9 +273,20 @@ function buildVolumeMounts(
     }
   }
 
+  // Notion MCP — mcp-remote token storage (writable so OAuth tokens persist across restarts)
+  if (isMcpAllowed('notion', isMain, toolPermissions)) {
+    const notionMcpAuthDir = path.join(homeDir, '.notion-mcp-auth');
+    fs.mkdirSync(notionMcpAuthDir, { recursive: true });
+    mounts.push({
+      hostPath: notionMcpAuthDir,
+      containerPath: '/home/node/.mcp-auth',
+      readonly: false,
+    });
+  }
+
   // Google Tasks credentials directory
   if (isMcpAllowed('google-tasks-vrob', isMain, toolPermissions)) {
-    const gtasksTokenDir = path.join(homeDir, '.config', 'mcp-googletasks-vrob');
+    const gtasksTokenDir = path.join(homeDir, '.config', `mcp-googletasks-vrob${instanceSuffix}`);
     fs.mkdirSync(gtasksTokenDir, { recursive: true });
     mounts.push({
       hostPath: gtasksTokenDir,
