@@ -283,7 +283,7 @@ function buildVolumeMounts(
 
   // Slack MCP — read-only (token stored in config.json, no refresh needed)
   if (isMcpAllowed('slack', isMain, toolPermissions)) {
-    const slackDir = path.join(homeDir, '.slack');
+    const slackDir = path.join(homeDir, `.slack${instanceSuffix}`);
     if (fs.existsSync(slackDir)) {
       mounts.push({
         hostPath: slackDir,
