@@ -60,7 +60,11 @@ interface VolumeMount {
   readonly: boolean;
 }
 
-function isMcpAllowed(name: string, isMain: boolean, perms?: ToolPermissions): boolean {
+function isMcpAllowed(
+  name: string,
+  isMain: boolean,
+  perms?: ToolPermissions,
+): boolean {
   if (isMain) return true;
   return (perms?.mcpServers ?? []).includes(name);
 }
@@ -216,7 +220,11 @@ function buildVolumeMounts(
     });
 
     // Google Calendar token storage (separate from credentials)
-    const gcalTokenDir = path.join(homeDir, '.config', `google-calendar-mcp${instanceSuffix}`);
+    const gcalTokenDir = path.join(
+      homeDir,
+      '.config',
+      `google-calendar-mcp${instanceSuffix}`,
+    );
     fs.mkdirSync(gcalTokenDir, { recursive: true });
     mounts.push({
       hostPath: gcalTokenDir,
@@ -273,6 +281,18 @@ function buildVolumeMounts(
     }
   }
 
+  // Slack MCP — read-only (token stored in config.json, no refresh needed)
+  if (isMcpAllowed('slack', isMain, toolPermissions)) {
+    const slackDir = path.join(homeDir, '.slack');
+    if (fs.existsSync(slackDir)) {
+      mounts.push({
+        hostPath: slackDir,
+        containerPath: '/home/node/.slack',
+        readonly: true,
+      });
+    }
+  }
+
   // Notion MCP — mcp-remote token storage (writable so OAuth tokens persist across restarts)
   if (isMcpAllowed('notion', isMain, toolPermissions)) {
     const notionMcpAuthDir = path.join(homeDir, '.notion-mcp-auth');
@@ -286,7 +306,11 @@ function buildVolumeMounts(
 
   // Google Tasks credentials directory
   if (isMcpAllowed('google-tasks-vrob', isMain, toolPermissions)) {
-    const gtasksTokenDir = path.join(homeDir, '.config', `mcp-googletasks-vrob${instanceSuffix}`);
+    const gtasksTokenDir = path.join(
+      homeDir,
+      '.config',
+      `mcp-googletasks-vrob${instanceSuffix}`,
+    );
     fs.mkdirSync(gtasksTokenDir, { recursive: true });
     mounts.push({
       hostPath: gtasksTokenDir,
@@ -361,8 +385,10 @@ function buildContainerArgs(
   args.push('-e', `TZ=${TIMEZONE}`);
 
   // Google Tasks MCP credentials (injected from host .env, never hardcoded)
-  if (GOOGLE_TASKS_CLIENT_ID) args.push('-e', `GOOGLE_TASKS_CLIENT_ID=${GOOGLE_TASKS_CLIENT_ID}`);
-  if (GOOGLE_TASKS_CLIENT_SECRET) args.push('-e', `GOOGLE_TASKS_CLIENT_SECRET=${GOOGLE_TASKS_CLIENT_SECRET}`);
+  if (GOOGLE_TASKS_CLIENT_ID)
+    args.push('-e', `GOOGLE_TASKS_CLIENT_ID=${GOOGLE_TASKS_CLIENT_ID}`);
+  if (GOOGLE_TASKS_CLIENT_SECRET)
+    args.push('-e', `GOOGLE_TASKS_CLIENT_SECRET=${GOOGLE_TASKS_CLIENT_SECRET}`);
 
   // Route API traffic through the credential proxy (containers never see real secrets)
   args.push(
@@ -418,7 +444,11 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain, group.containerConfig?.toolPermissions);
+  const mounts = buildVolumeMounts(
+    group,
+    input.isMain,
+    group.containerConfig?.toolPermissions,
+  );
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);

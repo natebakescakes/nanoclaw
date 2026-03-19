@@ -430,6 +430,7 @@ async function runQuery(
         ...(mcpAllowed('trakt', containerInput) ? ['mcp__trakt__*'] : []),
         ...(mcpAllowed('ibkr', containerInput) ? ['mcp__ibkr__*'] : []),
         ...(mcpAllowed('notion', containerInput) ? ['mcp__notion__*'] : []),
+        ...(mcpAllowed('slack', containerInput) ? ['mcp__slack__*'] : []),
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -499,6 +500,12 @@ async function runQuery(
           notion: {
             command: 'npx',
             args: ['-y', 'mcp-remote', 'https://mcp.notion.com/mcp'],
+          },
+        } : {}),
+        ...(mcpAllowed('slack', containerInput) ? {
+          slack: {
+            command: 'node',
+            args: ['/home/node/.slack/mcp.js'],
           },
         } : {}),
       },
