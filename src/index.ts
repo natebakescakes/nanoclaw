@@ -228,8 +228,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // Two supported reply-to forms:
         //   Wrapping:     <reply-to id="...">content</reply-to>  → inner content only
         //   Self-closing: <reply-to id="..."/>                   → strip tag, use rest
-        const wrapMatch = text.match(/<reply-to id="([^"]+)">([\s\S]*?)<\/reply-to>/);
-        const selfMatch = !wrapMatch ? text.match(/<reply-to id="([^"]+)"\s*\/>/) : null;
+        const wrapMatch = text.match(
+          /<reply-to id="([^"]+)">([\s\S]*?)<\/reply-to>/,
+        );
+        const selfMatch = !wrapMatch
+          ? text.match(/<reply-to id="([^"]+)"\s*\/>/)
+          : null;
         if (wrapMatch && channel.sendReply) {
           const replyText = wrapMatch[2].trim();
           if (replyText) {

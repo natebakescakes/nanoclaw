@@ -81,7 +81,9 @@ export const TIMEZONE =
 export const GOOGLE_TASKS_CLIENT_ID =
   process.env.GOOGLE_TASKS_CLIENT_ID || envConfig.GOOGLE_TASKS_CLIENT_ID || '';
 export const GOOGLE_TASKS_CLIENT_SECRET =
-  process.env.GOOGLE_TASKS_CLIENT_SECRET || envConfig.GOOGLE_TASKS_CLIENT_SECRET || '';
+  process.env.GOOGLE_TASKS_CLIENT_SECRET ||
+  envConfig.GOOGLE_TASKS_CLIENT_SECRET ||
+  '';
 
 export const TELEGRAM_BOT_POOL = (
   process.env.TELEGRAM_BOT_POOL ||

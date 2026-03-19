@@ -58,10 +58,14 @@ export async function transcribeAudio(
       whisperBin,
       [
         filePath,
-        '--model', WHISPER_MODEL,
-        '--output_format', 'txt',
-        '--output_dir', tmpDir,
-        '--fp16', 'False', // CPU-safe: disable fp16 so it doesn't crash on non-GPU
+        '--model',
+        WHISPER_MODEL,
+        '--output_format',
+        'txt',
+        '--output_dir',
+        tmpDir,
+        '--fp16',
+        'False', // CPU-safe: disable fp16 so it doesn't crash on non-GPU
       ],
       { timeout: WHISPER_TIMEOUT },
     );

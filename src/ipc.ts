@@ -125,7 +125,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       data.emoji,
                     );
                     logger.info(
-                      { chatJid: data.chatJid, messageId: data.messageId, emoji: data.emoji, sourceGroup },
+                      {
+                        chatJid: data.chatJid,
+                        messageId: data.messageId,
+                        emoji: data.emoji,
+                        sourceGroup,
+                      },
                       'IPC reaction sent',
                     );
                   } else {

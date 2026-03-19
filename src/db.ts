@@ -660,10 +660,22 @@ export function migrateGroupJid(oldJid: string, newJid: string): void {
      SELECT ?, name, last_message_time, channel, is_group FROM chats WHERE jid = ?`,
   ).run(newJid, oldJid);
 
-  db.prepare('UPDATE messages SET chat_jid = ? WHERE chat_jid = ?').run(newJid, oldJid);
-  db.prepare('UPDATE reactions SET chat_jid = ? WHERE chat_jid = ?').run(newJid, oldJid);
-  db.prepare('UPDATE scheduled_tasks SET chat_jid = ? WHERE chat_jid = ?').run(newJid, oldJid);
-  db.prepare('UPDATE registered_groups SET jid = ? WHERE jid = ?').run(newJid, oldJid);
+  db.prepare('UPDATE messages SET chat_jid = ? WHERE chat_jid = ?').run(
+    newJid,
+    oldJid,
+  );
+  db.prepare('UPDATE reactions SET chat_jid = ? WHERE chat_jid = ?').run(
+    newJid,
+    oldJid,
+  );
+  db.prepare('UPDATE scheduled_tasks SET chat_jid = ? WHERE chat_jid = ?').run(
+    newJid,
+    oldJid,
+  );
+  db.prepare('UPDATE registered_groups SET jid = ? WHERE jid = ?').run(
+    newJid,
+    oldJid,
+  );
 
   db.prepare('DELETE FROM chats WHERE jid = ?').run(oldJid);
 }
