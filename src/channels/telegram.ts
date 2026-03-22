@@ -338,7 +338,13 @@ export class TelegramChannel implements Channel {
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
 
-      this.opts.onChatMetadata(chatJid, timestamp, undefined, 'telegram', isGroup);
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
 
       let replyPrefix = '';
       if (ctx.message.reply_to_message) {
@@ -350,10 +356,11 @@ export class TelegramChannel implements Channel {
         replyPrefix = `[In reply to ${quotedSender}: "${quotedText}"]\n`;
       }
 
-      // Pick the largest photo ≤ 1280px wide, or the largest available
+      // Telegram returns photos ascending by size; pick the largest ≤ 1280px wide
       const photos = ctx.message.photo;
       const photo =
-        photos.find((p) => p.width <= 1280) ?? photos[photos.length - 1];
+        [...photos].reverse().find((p) => p.width <= 1280) ??
+        photos[photos.length - 1];
 
       let content = `${replyPrefix}[Photo]${caption}`;
       let images: ImageAttachment[] | undefined;
@@ -378,7 +385,9 @@ export class TelegramChannel implements Channel {
 
               // Encode as base64 for immediate vision
               const buf = await readFile(destPath);
-              images = [{ base64: buf.toString('base64'), mimeType: 'image/jpeg' }];
+              images = [
+                { base64: buf.toString('base64'), mimeType: 'image/jpeg' },
+              ];
               content = `${replyPrefix}[Photo: saved to attachments/${fileName}]${caption}`;
               logger.info({ chatJid, fileName }, 'Photo attachment saved');
             } finally {

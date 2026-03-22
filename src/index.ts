@@ -60,7 +60,12 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, ImageAttachment, NewMessage, RegisteredGroup } from './types.js';
+import {
+  Channel,
+  ImageAttachment,
+  NewMessage,
+  RegisteredGroup,
+} from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -224,55 +229,64 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
-      if (text) {
-        // Two supported reply-to forms:
-        //   Wrapping:     <reply-to id="...">content</reply-to>  → inner content only
-        //   Self-closing: <reply-to id="..."/>                   → strip tag, use rest
-        const wrapMatch = text.match(
-          /<reply-to id="([^"]+)">([\s\S]*?)<\/reply-to>/,
+  const output = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info(
+          { group: group.name },
+          `Agent output: ${raw.slice(0, 200)}`,
         );
-        const selfMatch = !wrapMatch
-          ? text.match(/<reply-to id="([^"]+)"\s*\/>/)
-          : null;
-        if (wrapMatch && channel.sendReply) {
-          const replyText = wrapMatch[2].trim();
-          if (replyText) {
-            await channel.sendReply(chatJid, wrapMatch[1], replyText);
+        if (text) {
+          // Two supported reply-to forms:
+          //   Wrapping:     <reply-to id="...">content</reply-to>  → inner content only
+          //   Self-closing: <reply-to id="..."/>                   → strip tag, use rest
+          const wrapMatch = text.match(
+            /<reply-to id="([^"]+)">([\s\S]*?)<\/reply-to>/,
+          );
+          const selfMatch = !wrapMatch
+            ? text.match(/<reply-to id="([^"]+)"\s*\/>/)
+            : null;
+          if (wrapMatch && channel.sendReply) {
+            const replyText = wrapMatch[2].trim();
+            if (replyText) {
+              await channel.sendReply(chatJid, wrapMatch[1], replyText);
+              outputSentToUser = true;
+            }
+          } else if (selfMatch && channel.sendReply) {
+            const replyText = text.replace(selfMatch[0], '').trim();
+            if (replyText) {
+              await channel.sendReply(chatJid, selfMatch[1], replyText);
+              outputSentToUser = true;
+            }
+          } else {
+            await channel.sendMessage(chatJid, text);
             outputSentToUser = true;
           }
-        } else if (selfMatch && channel.sendReply) {
-          const replyText = text.replace(selfMatch[0], '').trim();
-          if (replyText) {
-            await channel.sendReply(chatJid, selfMatch[1], replyText);
-            outputSentToUser = true;
-          }
-        } else {
-          await channel.sendMessage(chatJid, text);
-          outputSentToUser = true;
         }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  }, batchImages.length ? batchImages : undefined);
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    },
+    batchImages.length ? batchImages : undefined,
+  );
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
@@ -462,7 +476,13 @@ async function startMessageLoop(): Promise<void> {
           );
           for (const m of messagesToSend) pendingImages.delete(m.id);
 
-          if (queue.sendMessage(chatJid, formatted, followUpImages.length ? followUpImages : undefined)) {
+          if (
+            queue.sendMessage(
+              chatJid,
+              formatted,
+              followUpImages.length ? followUpImages : undefined,
+            )
+          ) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
