@@ -309,12 +309,14 @@ Use available_groups.json to find the JID for a group. The folder name must be c
     trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
     containerConfig: z.object({
       toolPermissions: z.object({
-        mcpServers: z.array(z.string()),
+        mcpServers: z.array(z.string()).optional(),
+        mcpServerProfiles: z.array(z.string()).optional(),
       }).optional(),
     }).optional().describe(
-      'Optional tool restrictions. mcpServers is a whitelist of allowed MCP servers ' +
-      '(e.g., ["google-calendar"]). Omit to allow all tools for main; non-main groups ' +
-      'with no toolPermissions get no external MCP servers by default.',
+      'Optional tool restrictions. mcpServers is a whitelist of allowed MCP server families ' +
+      '(e.g., ["google-calendar"]). mcpServerProfiles is a whitelist of exact profile-scoped ' +
+      'tool IDs (e.g., ["google-calendar:personal"]). Omit to allow all tools for main; ' +
+      'non-main groups with no toolPermissions get no external MCP servers by default.',
     ),
   },
   async (args) => {

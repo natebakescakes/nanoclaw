@@ -21,6 +21,7 @@ import { fileURLToPath } from 'url';
 
 interface ToolPermissions {
   mcpServers?: string[];
+  mcpServerProfiles?: string[];
 }
 
 interface ImageAttachment {
@@ -378,7 +379,12 @@ function waitForIpcMessage(): Promise<string | ContentBlock[] | null> {
  */
 function mcpAllowed(name: string, containerInput: ContainerInput): boolean {
   if (containerInput.isMain) return true;
-  return (containerInput.toolPermissions?.mcpServers ?? []).includes(name);
+  if ((containerInput.toolPermissions?.mcpServers ?? []).includes(name)) {
+    return true;
+  }
+  return (containerInput.toolPermissions?.mcpServerProfiles ?? []).some(
+    profileId => profileId === name || profileId.startsWith(`${name}:`),
+  );
 }
 
 /**
