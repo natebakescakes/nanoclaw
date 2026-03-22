@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
+import fs from 'fs';
 
 // Sentinel markers must match container-runner.ts
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -13,9 +14,12 @@ vi.mock('./config.js', () => ({
   CONTAINER_TIMEOUT: 1800000, // 30min
   CREDENTIAL_PROXY_PORT: 3001,
   DATA_DIR: '/tmp/nanoclaw-test-data',
+  GOOGLE_TASKS_CLIENT_ID: '',
+  GOOGLE_TASKS_CLIENT_SECRET: '',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
   TIMEZONE: 'America/Los_Angeles',
+  TOOL_PROFILES_PATH: '/tmp/nanoclaw-tool-profiles.json',
 }));
 
 // Mock logger
@@ -49,6 +53,35 @@ vi.mock('fs', async () => {
 // Mock mount-security
 vi.mock('./mount-security.js', () => ({
   validateAdditionalMounts: vi.fn(() => []),
+}));
+
+vi.mock('./tool-profiles.js', () => ({
+  loadToolProfileRegistry: vi.fn(() => ({
+    'gmail:personal': {
+      tool: 'gmail',
+      mounts: [
+        {
+          hostPath: '/tmp/home/.gmail-mcp-personal',
+          containerPath: '/home/node/.gmail-mcp',
+          readonly: false,
+        },
+      ],
+    },
+    slack: {
+      tool: 'slack',
+      mounts: [
+        {
+          hostPath: '/tmp/home/.slack',
+          containerPath: '/home/node/.slack',
+          readonly: true,
+        },
+      ],
+    },
+  })),
+  resolveAllowedToolProfileIds: vi.fn((_isMain, perms) => {
+    if (!perms) return [];
+    return [...(perms.mcpServerProfiles ?? []), ...(perms.mcpServers ?? [])];
+  }),
 }));
 
 // Create a controllable fake ChildProcess
@@ -86,7 +119,11 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import {
+  buildVolumeMounts,
+  runContainerAgent,
+  ContainerOutput,
+} from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -114,6 +151,8 @@ function emitOutputMarker(
 describe('container-runner timeout behavior', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.clearAllMocks();
+    vi.mocked(fs.existsSync).mockReturnValue(false);
     fakeProc = createFakeProcess();
   });
 
@@ -206,5 +245,74 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+});
+
+describe('container-runner tool profiles', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    fakeProc = createFakeProcess();
+  });
+
+  it('mounts only the exact allowed scoped tool profile', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p) => p === '/tmp/home/.gmail-mcp-personal',
+    );
+    const group: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: {
+        toolPermissions: {
+          mcpServerProfiles: ['gmail:personal'],
+        },
+      },
+    };
+
+    const mounts = buildVolumeMounts(
+      group,
+      false,
+      group.containerConfig?.toolPermissions,
+    );
+
+    expect(
+      mounts.some(
+        (m) =>
+          m.hostPath === '/tmp/home/.gmail-mcp-personal' &&
+          m.containerPath === '/home/node/.gmail-mcp',
+      ),
+    ).toBe(true);
+    expect(
+      mounts.some(
+        (m) =>
+          m.hostPath === '/tmp/home/.slack' &&
+          m.containerPath === '/home/node/.slack',
+      ),
+    ).toBe(false);
+  });
+
+  it('legacy tool allowlist still mounts matching default tool profile', () => {
+    vi.mocked(fs.existsSync).mockImplementation((p) => p === '/tmp/home/.slack');
+    const group: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: {
+        toolPermissions: {
+          mcpServers: ['slack'],
+        },
+      },
+    };
+
+    const mounts = buildVolumeMounts(
+      group,
+      false,
+      group.containerConfig?.toolPermissions,
+    );
+
+    expect(
+      mounts.some(
+        (m) =>
+          m.hostPath === '/tmp/home/.slack' &&
+          m.containerPath === '/home/node/.slack',
+      ),
+    ).toBe(true);
   });
 });

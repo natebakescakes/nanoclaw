@@ -4,7 +4,6 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 
 import {
@@ -30,6 +29,10 @@ import {
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { validateAdditionalMounts } from './mount-security.js';
+import {
+  loadToolProfileRegistry,
+  resolveAllowedToolProfileIds,
+} from './tool-profiles.js';
 import { RegisteredGroup, ToolPermissions } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -62,16 +65,7 @@ interface VolumeMount {
   readonly: boolean;
 }
 
-function isMcpAllowed(
-  name: string,
-  isMain: boolean,
-  perms?: ToolPermissions,
-): boolean {
-  if (isMain) return true;
-  return (perms?.mcpServers ?? []).includes(name);
-}
-
-function buildVolumeMounts(
+export function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
   toolPermissions?: ToolPermissions,
@@ -188,144 +182,33 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  const homeDir = os.homedir();
+  const registry = loadToolProfileRegistry();
+  const allowedProfiles = resolveAllowedToolProfileIds(
+    isMain,
+    toolPermissions,
+    registry,
+  );
+  const seenMounts = new Set<string>();
 
-  // Derive an instance-specific suffix from the project directory name so that
-  // multiple NanoClaw installs on the same host use separate credential dirs.
-  // e.g. "nanoclaw" → "" (default, no suffix), "nanoclaw-multiplier" → "-multiplier"
-  const instanceSuffix = (() => {
-    const dirName = path.basename(projectRoot);
-    const stripped = dirName.replace(/^nanoclaw-?/, '');
-    return stripped ? `-${stripped}` : '';
-  })();
+  for (const profileId of allowedProfiles) {
+    const profile = registry[profileId];
+    if (!profile) continue;
+    for (const mount of profile.mounts) {
+      if (mount.create) {
+        fs.mkdirSync(mount.hostPath, { recursive: true });
+      } else if (!fs.existsSync(mount.hostPath)) {
+        continue;
+      }
 
-  // Gmail credentials directory (for Gmail MCP inside the container)
-  if (isMcpAllowed('gmail', isMain, toolPermissions)) {
-
-    const gmailDir = path.join(homeDir, `.gmail-mcp${instanceSuffix}`);
-    if (fs.existsSync(gmailDir)) {
+      const mountKey = `${mount.hostPath}:${mount.containerPath}`;
+      if (seenMounts.has(mountKey)) continue;
+      seenMounts.add(mountKey);
       mounts.push({
-        hostPath: gmailDir,
-        containerPath: '/home/node/.gmail-mcp',
-        readonly: false, // MCP may need to refresh OAuth tokens
+        hostPath: mount.hostPath,
+        containerPath: mount.containerPath,
+        readonly: mount.readonly,
       });
     }
-  }
-
-  // Google Calendar credentials directory (for Calendar MCP inside the container)
-  if (isMcpAllowed('google-calendar', isMain, toolPermissions)) {
-
-    const gcalDir = path.join(homeDir, `.gcal-mcp${instanceSuffix}`);
-    fs.mkdirSync(gcalDir, { recursive: true });
-    mounts.push({
-      hostPath: gcalDir,
-      containerPath: '/home/node/.gcal-mcp',
-      readonly: false, // MCP may need to refresh OAuth tokens
-    });
-
-    // Google Calendar token storage (separate from credentials)
-    const gcalTokenDir = path.join(
-      homeDir,
-      '.config',
-
-      `google-calendar-mcp${instanceSuffix}`,
-    );
-    fs.mkdirSync(gcalTokenDir, { recursive: true });
-    mounts.push({
-      hostPath: gcalTokenDir,
-      containerPath: '/home/node/.config/google-calendar-mcp',
-      readonly: false,
-    });
-  }
-
-  // LittleLives MCP — mount config + mcp script (read-only, token stored on host)
-  if (isMcpAllowed('littlelives', isMain, toolPermissions)) {
-    const llDir = path.join(homeDir, '.littlelives');
-    if (fs.existsSync(llDir)) {
-      mounts.push({
-        hostPath: llDir,
-        containerPath: '/home/node/.littlelives',
-        readonly: true,
-      });
-    }
-  }
-
-  // YNAB MCP — mount config + mcp script (read-only, token stored on host)
-  if (isMcpAllowed('ynab', isMain, toolPermissions)) {
-    const ynabDir = path.join(homeDir, '.ynab');
-    if (fs.existsSync(ynabDir)) {
-      mounts.push({
-        hostPath: ynabDir,
-        containerPath: '/home/node/.ynab',
-        readonly: true,
-      });
-    }
-  }
-
-  // Trakt MCP — writable so token refresh can be persisted back to host
-  if (isMcpAllowed('trakt', isMain, toolPermissions)) {
-    const traktDir = path.join(homeDir, '.trakt');
-    if (fs.existsSync(traktDir)) {
-      mounts.push({
-        hostPath: traktDir,
-        containerPath: '/home/node/.trakt',
-        readonly: false,
-      });
-    }
-  }
-
-  // IBKR MCP — read-only (no auth tokens to refresh; gateway handles auth)
-  if (isMcpAllowed('ibkr', isMain, toolPermissions)) {
-    const ibkrDir = path.join(homeDir, '.ibkr');
-    if (fs.existsSync(ibkrDir)) {
-      mounts.push({
-        hostPath: ibkrDir,
-        containerPath: '/home/node/.ibkr',
-        readonly: true,
-      });
-    }
-  }
-
-  // Slack MCP — read-only (token stored in config.json, no refresh needed)
-  if (isMcpAllowed('slack', isMain, toolPermissions)) {
-    const slackDir = path.join(homeDir, `.slack${instanceSuffix}`);
-    if (fs.existsSync(slackDir)) {
-      mounts.push({
-        hostPath: slackDir,
-        containerPath: '/home/node/.slack',
-        readonly: true,
-      });
-    }
-  }
-
-  // Notion MCP — mcp-remote token storage (writable so OAuth tokens persist across restarts)
-  if (isMcpAllowed('notion', isMain, toolPermissions)) {
-    const notionMcpAuthDir = path.join(
-      homeDir,
-      `.notion-mcp-auth${instanceSuffix}`,
-    );
-    fs.mkdirSync(notionMcpAuthDir, { recursive: true });
-    mounts.push({
-      hostPath: notionMcpAuthDir,
-      containerPath: '/home/node/.mcp-auth',
-      readonly: false,
-    });
-  }
-
-  // Google Tasks credentials directory
-  if (isMcpAllowed('google-tasks-vrob', isMain, toolPermissions)) {
-    const gtasksTokenDir = path.join(
-      homeDir,
-      '.config',
-
-      `mcp-googletasks-vrob${instanceSuffix}`,
-    );
-    fs.mkdirSync(gtasksTokenDir, { recursive: true });
-    mounts.push({
-      hostPath: gtasksTokenDir,
-      containerPath: '/home/node/.config/mcp-googletasks-vrob',
-      readonly: false,
-    });
   }
 
   // Per-group IPC namespace: each group gets its own IPC directory

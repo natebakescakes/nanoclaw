@@ -32,6 +32,9 @@ export interface ToolPermissions {
   // If undefined or absent on the main group, all MCP servers are enabled.
   // For non-main groups, absent means no external MCP servers.
   mcpServers?: string[];
+  // Exact profile-scoped tool IDs to enable (e.g., ['gmail:personal']).
+  // When present, these narrow access to specific credential profiles.
+  mcpServerProfiles?: string[];
 }
 
 export interface ContainerConfig {
