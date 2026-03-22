@@ -1,0 +1,31 @@
+#!/bin/bash
+# pdf-reader: Extract text from PDF files or URLs
+#
+# Usage:
+#   pdf-reader <path>        — extract text from a local PDF
+#   pdf-reader fetch <url>   — download and extract text from a PDF URL
+
+set -e
+
+if [ $# -eq 0 ]; then
+  echo "Usage: pdf-reader <path>" >&2
+  echo "       pdf-reader fetch <url>" >&2
+  exit 1
+fi
+
+if [ "$1" = "fetch" ]; then
+  if [ -z "$2" ]; then
+    echo "Error: URL required" >&2
+    exit 1
+  fi
+  TMPFILE=$(mktemp /tmp/pdf-reader-XXXX.pdf)
+  trap "rm -f $TMPFILE" EXIT
+  curl -sL "$2" -o "$TMPFILE"
+  pdftotext "$TMPFILE" -
+else
+  if [ ! -f "$1" ]; then
+    echo "Error: File not found: $1" >&2
+    exit 1
+  fi
+  pdftotext "$1" -
+fi

@@ -1,4 +1,5 @@
-import { unlink } from 'fs/promises';
+import { copyFile, mkdir, unlink } from 'fs/promises';
+import path from 'path';
 import https from 'https';
 
 import { Api, Bot } from 'grammy';
@@ -8,6 +9,7 @@ import { readEnvFile } from '../env.js';
 import { migrateGroupJid, removeReaction, storeReaction } from '../db.js';
 import { logger } from '../logger.js';
 import { downloadTelegramFile, transcribeAudio } from '../whisper.js';
+import { resolveGroupFolderPath } from '../group-folder.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -395,9 +397,97 @@ export class TelegramChannel implements Channel {
       });
     });
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
-    this.bot.on('message:document', (ctx) => {
-      const name = ctx.message.document?.file_name || 'file';
-      storeNonText(ctx, `[Document: ${name}]`);
+    this.bot.on('message:document', async (ctx) => {
+      const doc = ctx.message.document;
+      const fileName = doc?.file_name || 'document';
+      const mimeType = doc?.mime_type || '';
+      const lowerName = fileName.toLowerCase();
+      const isPdf =
+        mimeType === 'application/pdf' || lowerName.endsWith('.pdf');
+      const isCsv =
+        mimeType === 'text/csv' ||
+        mimeType === 'application/csv' ||
+        lowerName.endsWith('.csv');
+
+      if (!isPdf && !isCsv) {
+        storeNonText(ctx, `[Document: ${fileName}]`);
+        return;
+      }
+
+      // PDF: download to group attachments so the agent can read it
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+
+      let replyPrefix = '';
+      if (ctx.message.reply_to_message) {
+        const quoted = ctx.message.reply_to_message as any;
+        const quotedSender =
+          quoted.from?.first_name || quoted.from?.username || 'Unknown';
+        const quotedText =
+          quoted.text || quoted.caption || '[non-text message]';
+        replyPrefix = `[In reply to ${quotedSender}: "${quotedText}"]\n`;
+      }
+
+      const fileType = isPdf ? 'PDF' : 'CSV';
+      let content = `${replyPrefix}[${fileType}: ${fileName}]${caption}`;
+
+      try {
+        const fileInfo = await ctx.api.getFile(doc!.file_id);
+        if (fileInfo.file_path) {
+          const tmpFile = await downloadTelegramFile(
+            this.botToken,
+            fileInfo.file_path,
+          );
+          if (tmpFile) {
+            try {
+              const groupDir = resolveGroupFolderPath(group.folder);
+              const attachmentsDir = path.join(groupDir, 'attachments');
+              await mkdir(attachmentsDir, { recursive: true });
+              const destPath = path.join(attachmentsDir, fileName);
+              await copyFile(tmpFile, destPath);
+              if (isPdf) {
+                content = `${replyPrefix}[PDF: ${fileName} — saved to attachments/${fileName}, use pdf-reader to extract text]${caption}`;
+              } else {
+                content = `${replyPrefix}[CSV: ${fileName} — saved to attachments/${fileName}, read with: cat attachments/${fileName}]${caption}`;
+              }
+              logger.info({ chatJid, fileName, fileType }, 'Attachment saved');
+            } finally {
+              await unlink(tmpFile).catch(() => {});
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn({ err }, 'PDF download failed, using placeholder');
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+      });
     });
     this.bot.on('message:sticker', (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';

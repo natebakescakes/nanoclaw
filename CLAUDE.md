@@ -44,15 +44,15 @@ npm run build        # Compile TypeScript
 
 Service management:
 ```bash
-# macOS (launchd)
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # restart
+# This repo is managed by nanoclaw-personal.service (trigger: @Rhea)
+# There are three nanoclaw instances on this machine — always use the right one:
+#   nanoclaw-personal.service  → /home/developer/nanoclaw        (this repo, @Rhea)
+#   nanoclaw-radicle.service   → /home/developer/nanoclaw-radicle
+#   nanoclaw.service           → /home/developer/nanoclaw-multiplier
 
-# Linux (systemd)
-systemctl --user start nanoclaw
-systemctl --user stop nanoclaw
-systemctl --user restart nanoclaw
+systemctl --user start nanoclaw-personal
+systemctl --user stop nanoclaw-personal
+systemctl --user restart nanoclaw-personal
 ```
 
 ## Troubleshooting
