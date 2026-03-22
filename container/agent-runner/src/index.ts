@@ -23,6 +23,27 @@ interface ToolPermissions {
   mcpServers?: string[];
 }
 
+interface ImageAttachment {
+  base64: string;
+  mimeType: string;
+}
+
+interface TextBlock {
+  type: 'text';
+  text: string;
+}
+
+interface ImageBlock {
+  type: 'image';
+  source: {
+    type: 'base64';
+    media_type: string;
+    data: string;
+  };
+}
+
+type ContentBlock = TextBlock | ImageBlock;
+
 interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -32,6 +53,7 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   toolPermissions?: ToolPermissions;
+  images?: ImageAttachment[];
 }
 
 interface ContainerOutput {
@@ -54,7 +76,7 @@ interface SessionsIndex {
 
 interface SDKUserMessage {
   type: 'user';
-  message: { role: 'user'; content: string };
+  message: { role: 'user'; content: string | ContentBlock[] };
   parent_tool_use_id: null;
   session_id: string;
 }
@@ -72,10 +94,10 @@ class MessageStream {
   private waiting: (() => void) | null = null;
   private done = false;
 
-  push(text: string): void {
+  push(content: string | ContentBlock[]): void {
     this.queue.push({
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       session_id: '',
     });
@@ -275,24 +297,40 @@ function shouldClose(): boolean {
 }
 
 /**
- * Drain all pending IPC input messages.
- * Returns messages found, or empty array.
+ * Build a content block array from text + optional images.
+ * Images come first so the model sees them before the text context.
  */
-function drainIpcInput(): string[] {
+function buildContent(text: string, images?: ImageAttachment[]): string | ContentBlock[] {
+  if (!images?.length) return text;
+  const blocks: ContentBlock[] = [
+    ...images.map((img): ImageBlock => ({
+      type: 'image',
+      source: { type: 'base64', media_type: img.mimeType, data: img.base64 },
+    })),
+    { type: 'text', text },
+  ];
+  return blocks;
+}
+
+/**
+ * Drain all pending IPC input messages.
+ * Returns content (string or content blocks) for each message found.
+ */
+function drainIpcInput(): Array<string | ContentBlock[]> {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs.readdirSync(IPC_INPUT_DIR)
       .filter(f => f.endsWith('.json'))
       .sort();
 
-    const messages: string[] = [];
+    const messages: Array<string | ContentBlock[]> = [];
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
         if (data.type === 'message' && data.text) {
-          messages.push(data.text);
+          messages.push(buildContent(data.text, data.images));
         }
       } catch (err) {
         log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
@@ -308,9 +346,9 @@ function drainIpcInput(): string[] {
 
 /**
  * Wait for a new IPC message or _close sentinel.
- * Returns the messages as a single string, or null if _close.
+ * Returns content for the next message, or null if _close.
  */
-function waitForIpcMessage(): Promise<string | null> {
+function waitForIpcMessage(): Promise<string | ContentBlock[] | null> {
   return new Promise((resolve) => {
     const poll = () => {
       if (shouldClose()) {
@@ -319,7 +357,13 @@ function waitForIpcMessage(): Promise<string | null> {
       }
       const messages = drainIpcInput();
       if (messages.length > 0) {
-        resolve(messages.join('\n'));
+        // Join multiple text-only messages; for messages with images return first
+        const first = messages[0];
+        if (messages.length === 1 || typeof first !== 'string') {
+          resolve(first);
+        } else {
+          resolve(messages.filter(m => typeof m === 'string').join('\n'));
+        }
         return;
       }
       setTimeout(poll, IPC_POLL_MS);
@@ -344,7 +388,7 @@ function mcpAllowed(name: string, containerInput: ContainerInput): boolean {
  * Also pipes IPC messages into the stream during the query.
  */
 async function runQuery(
-  prompt: string,
+  prompt: string | ContentBlock[],
   sessionId: string | undefined,
   mcpServerPath: string,
   containerInput: ContainerInput,
@@ -367,9 +411,10 @@ async function runQuery(
       return;
     }
     const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
+    for (const content of messages) {
+      const len = typeof content === 'string' ? content.length : content.length;
+      log(`Piping IPC message into active query (${len} blocks/chars)`);
+      stream.push(content);
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
@@ -585,15 +630,19 @@ async function main(): Promise<void> {
   try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
 
   // Build initial prompt (drain any pending IPC messages too)
-  let prompt = containerInput.prompt;
+  let promptText = containerInput.prompt;
   if (containerInput.isScheduledTask) {
-    prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
+    promptText = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${promptText}`;
   }
   const pending = drainIpcInput();
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.join('\n');
+    // Append only text IPC messages to the initial prompt text
+    const textParts = pending.filter((m): m is string => typeof m === 'string');
+    if (textParts.length > 0) promptText += '\n' + textParts.join('\n');
   }
+  // prompt is string | ContentBlock[] depending on whether images are attached
+  let prompt: string | ContentBlock[] = buildContent(promptText, containerInput.images);
 
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;

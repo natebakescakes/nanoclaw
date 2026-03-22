@@ -45,6 +45,8 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   toolPermissions?: ToolPermissions;
+  /** Base64-encoded images to send as multimodal content with the prompt. */
+  images?: { base64: string; mimeType: string }[];
 }
 
 export interface ContainerOutput {
@@ -199,6 +201,7 @@ function buildVolumeMounts(
 
   // Gmail credentials directory (for Gmail MCP inside the container)
   if (isMcpAllowed('gmail', isMain, toolPermissions)) {
+
     const gmailDir = path.join(homeDir, `.gmail-mcp${instanceSuffix}`);
     if (fs.existsSync(gmailDir)) {
       mounts.push({
@@ -211,6 +214,7 @@ function buildVolumeMounts(
 
   // Google Calendar credentials directory (for Calendar MCP inside the container)
   if (isMcpAllowed('google-calendar', isMain, toolPermissions)) {
+
     const gcalDir = path.join(homeDir, `.gcal-mcp${instanceSuffix}`);
     fs.mkdirSync(gcalDir, { recursive: true });
     mounts.push({
@@ -223,6 +227,7 @@ function buildVolumeMounts(
     const gcalTokenDir = path.join(
       homeDir,
       '.config',
+
       `google-calendar-mcp${instanceSuffix}`,
     );
     fs.mkdirSync(gcalTokenDir, { recursive: true });
@@ -312,6 +317,7 @@ function buildVolumeMounts(
     const gtasksTokenDir = path.join(
       homeDir,
       '.config',
+
       `mcp-googletasks-vrob${instanceSuffix}`,
     );
     fs.mkdirSync(gtasksTokenDir, { recursive: true });

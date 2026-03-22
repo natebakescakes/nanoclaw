@@ -1,4 +1,4 @@
-import { copyFile, mkdir, unlink } from 'fs/promises';
+import { copyFile, mkdir, readFile, unlink } from 'fs/promises';
 import path from 'path';
 import https from 'https';
 
@@ -13,6 +13,7 @@ import { resolveGroupFolderPath } from '../group-folder.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
+  ImageAttachment,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
@@ -322,7 +323,84 @@ export class TelegramChannel implements Channel {
       });
     };
 
-    this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
+    this.bot.on('message:photo', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+
+      this.opts.onChatMetadata(chatJid, timestamp, undefined, 'telegram', isGroup);
+
+      let replyPrefix = '';
+      if (ctx.message.reply_to_message) {
+        const quoted = ctx.message.reply_to_message as any;
+        const quotedSender =
+          quoted.from?.first_name || quoted.from?.username || 'Unknown';
+        const quotedText =
+          quoted.text || quoted.caption || '[non-text message]';
+        replyPrefix = `[In reply to ${quotedSender}: "${quotedText}"]\n`;
+      }
+
+      // Pick the largest photo ≤ 1280px wide, or the largest available
+      const photos = ctx.message.photo;
+      const photo =
+        photos.find((p) => p.width <= 1280) ?? photos[photos.length - 1];
+
+      let content = `${replyPrefix}[Photo]${caption}`;
+      let images: ImageAttachment[] | undefined;
+
+      try {
+        const fileInfo = await ctx.api.getFile(photo.file_id);
+        if (fileInfo.file_path) {
+          const tmpFile = await downloadTelegramFile(
+            this.botToken,
+            fileInfo.file_path,
+          );
+          if (tmpFile) {
+            try {
+              // Save to attachments/ for later reference
+              const groupDir = resolveGroupFolderPath(group.folder);
+              const attachmentsDir = path.join(groupDir, 'attachments');
+              await mkdir(attachmentsDir, { recursive: true });
+              const ext = path.extname(fileInfo.file_path) || '.jpg';
+              const fileName = `photo-${ctx.message.message_id}${ext}`;
+              const destPath = path.join(attachmentsDir, fileName);
+              await copyFile(tmpFile, destPath);
+
+              // Encode as base64 for immediate vision
+              const buf = await readFile(destPath);
+              images = [{ base64: buf.toString('base64'), mimeType: 'image/jpeg' }];
+              content = `${replyPrefix}[Photo: saved to attachments/${fileName}]${caption}`;
+              logger.info({ chatJid, fileName }, 'Photo attachment saved');
+            } finally {
+              await unlink(tmpFile).catch(() => {});
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn({ err }, 'Photo download failed, using placeholder');
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+        images,
+      });
+    });
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
     this.bot.on('message:voice', async (ctx) => {
       const chatJid = `tg:${ctx.chat.id}`;

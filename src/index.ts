@@ -60,7 +60,7 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { Channel, ImageAttachment, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -74,6 +74,10 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+
+// In-memory cache for image attachments (not persisted to DB).
+// Populated by onMessage; consumed when building the container prompt.
+const pendingImages = new Map<string, ImageAttachment[]>();
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -184,6 +188,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const prompt = formatMessages(missedMessages, TIMEZONE);
 
+  // Collect and consume any pending images for this batch
+  const batchImages = missedMessages.flatMap(
+    (m) => pendingImages.get(m.id) ?? [],
+  );
+  for (const m of missedMessages) pendingImages.delete(m.id);
+
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
@@ -262,7 +272,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (result.status === 'error') {
       hadError = true;
     }
-  });
+  }, batchImages.length ? batchImages : undefined);
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
@@ -295,6 +305,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  images?: ImageAttachment[],
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
@@ -346,6 +357,7 @@ async function runAgent(
         isMain,
         assistantName: ASSISTANT_NAME,
         toolPermissions: group.containerConfig?.toolPermissions,
+        images: images?.length ? images : undefined,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -445,8 +457,12 @@ async function startMessageLoop(): Promise<void> {
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend, TIMEZONE);
+          const followUpImages = messagesToSend.flatMap(
+            (m) => pendingImages.get(m.id) ?? [],
+          );
+          for (const m of messagesToSend) pendingImages.delete(m.id);
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          if (queue.sendMessage(chatJid, formatted, followUpImages.length ? followUpImages : undefined)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
@@ -591,6 +607,11 @@ async function main(): Promise<void> {
         }
       }
       storeMessage(msg);
+      // Cache images in memory so processGroupMessages can pick them up
+      if (msg.images?.length) {
+        pendingImages.set(msg.id, msg.images);
+        setTimeout(() => pendingImages.delete(msg.id), 3_600_000);
+      }
     },
     onChatMetadata: (
       chatJid: string,
