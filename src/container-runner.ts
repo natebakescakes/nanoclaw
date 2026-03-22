@@ -238,15 +238,13 @@ export function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
-  }
-  // Always sync index.ts so core permission logic stays up to date
+  // Always sync the full agent-runner source so imported groups do not keep
+  // stale container-side behavior from previous NanoClaw instances.
   if (fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(
-      path.join(agentRunnerSrc, 'index.ts'),
-      path.join(groupAgentRunnerDir, 'index.ts'),
-    );
+    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, {
+      recursive: true,
+      force: true,
+    });
   }
   mounts.push({
     hostPath: groupAgentRunnerDir,

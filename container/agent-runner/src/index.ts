@@ -449,6 +449,16 @@ function getAllowedToolProfiles(
   );
 }
 
+function buildNpxCacheEnv(
+  profile: ResolvedToolProfile,
+): Record<string, string> {
+  const cacheDir = path.join('/tmp', 'nanoclaw-npm-cache', profile.serverName);
+  return {
+    NPM_CONFIG_CACHE: cacheDir,
+    npm_config_cache: cacheDir,
+  };
+}
+
 function buildProfileMcpServerConfig(profile: ResolvedToolProfile): {
   command: string;
   args: string[];
@@ -461,6 +471,7 @@ function buildProfileMcpServerConfig(profile: ResolvedToolProfile): {
         args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
         env: {
           HOME: profile.homeDir,
+          ...buildNpxCacheEnv(profile),
         },
       };
     case 'google-calendar':
@@ -469,6 +480,7 @@ function buildProfileMcpServerConfig(profile: ResolvedToolProfile): {
         args: ['-y', '@cocal/google-calendar-mcp'],
         env: {
           HOME: profile.homeDir,
+          ...buildNpxCacheEnv(profile),
           GOOGLE_OAUTH_CREDENTIALS: path.join(
             profile.homeDir,
             '.gcal-mcp',
@@ -488,6 +500,7 @@ function buildProfileMcpServerConfig(profile: ResolvedToolProfile): {
         args: ['-y', 'mcp-googletasks-vrob'],
         env: {
           HOME: profile.homeDir,
+          ...buildNpxCacheEnv(profile),
           GOOGLE_CLIENT_ID: process.env.GOOGLE_TASKS_CLIENT_ID ?? '',
           GOOGLE_CLIENT_SECRET: process.env.GOOGLE_TASKS_CLIENT_SECRET ?? '',
         },
@@ -530,6 +543,7 @@ function buildProfileMcpServerConfig(profile: ResolvedToolProfile): {
         args: ['-y', 'mcp-remote', 'https://mcp.notion.com/mcp'],
         env: {
           HOME: profile.homeDir,
+          ...buildNpxCacheEnv(profile),
         },
       };
     case 'slack':
@@ -543,6 +557,22 @@ function buildProfileMcpServerConfig(profile: ResolvedToolProfile): {
     default:
       return null;
   }
+}
+
+function buildToolAccessContext(containerInput: ContainerInput): string {
+  const allowedProfiles = getAllowedToolProfiles(containerInput);
+  const toolFamilies = [...new Set(allowedProfiles.map((p) => p.tool))].sort();
+  const profileIds = allowedProfiles.map((p) => p.profileId).sort();
+
+  return [
+    '<active_tool_access>',
+    `main_group=${containerInput.isMain ? 'yes' : 'no'}`,
+    `tool_families=${toolFamilies.length > 0 ? toolFamilies.join(', ') : 'none'}`,
+    `profile_ids=${profileIds.length > 0 ? profileIds.join(', ') : 'none'}`,
+    'Use this exact block when the user asks which tools or profiles are active in this group.',
+    '</active_tool_access>',
+    '',
+  ].join('\n');
 }
 
 /**
@@ -783,6 +813,7 @@ async function main(): Promise<void> {
 
   // Build initial prompt (drain any pending IPC messages too)
   let promptText = containerInput.prompt;
+  promptText = buildToolAccessContext(containerInput) + promptText;
   if (containerInput.isScheduledTask) {
     promptText = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${promptText}`;
   }
