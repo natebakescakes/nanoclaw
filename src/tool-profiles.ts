@@ -20,6 +20,14 @@ export interface ToolProfileDefinition {
 
 export type ToolProfileRegistry = Record<string, ToolProfileDefinition>;
 
+export interface ResolvedToolProfile {
+  profileId: string;
+  tool: string;
+  serverName: string;
+  homeDir: string;
+  mounts: ToolProfileMount[];
+}
+
 interface ToolProfilesConfigFile {
   profiles?: Record<
     string,
@@ -44,6 +52,41 @@ function expandHome(p: string, homeDir: string): string {
 function inferToolFromProfileId(profileId: string): string {
   const idx = profileId.indexOf(':');
   return idx === -1 ? profileId : profileId.slice(0, idx);
+}
+
+function sanitizeProfileSegment(value: string): string {
+  return value
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+}
+
+function toProfileServerName(profileId: string): string {
+  const [tool, profile = 'default'] = profileId.split(':', 2);
+  return `${sanitizeProfileSegment(tool)}__${sanitizeProfileSegment(profile) || 'default'}`;
+}
+
+function toProfileHomeDir(profileId: string): string {
+  return path.join(
+    '/home/node/.nanoclaw/tool-profiles',
+    sanitizeProfileSegment(profileId),
+  );
+}
+
+function toScopedContainerPath(
+  profileId: string,
+  containerPath: string,
+): string {
+  const profileHome = toProfileHomeDir(profileId);
+  if (containerPath === '/home/node') return profileHome;
+  if (containerPath.startsWith('/home/node/')) {
+    return path.join(profileHome, containerPath.slice('/home/node/'.length));
+  }
+  return path.join(
+    profileHome,
+    'mounts',
+    containerPath.replace(/^\/+/, '').replace(/\//g, '__'),
+  );
 }
 
 export function getToolFamily(permissionId: string): string {
@@ -237,4 +280,33 @@ export function resolveAllowedToolProfileIds(
   }
 
   return [...allowed];
+}
+
+export function resolveToolProfiles(
+  isMain: boolean,
+  perms: ToolPermissions | undefined,
+  registry: ToolProfileRegistry,
+): ResolvedToolProfile[] {
+  return resolveAllowedToolProfileIds(isMain, perms, registry).flatMap(
+    (profileId) => {
+      const profile = registry[profileId];
+      if (!profile) return [];
+
+      return [
+        {
+          profileId,
+          tool: profile.tool,
+          serverName: toProfileServerName(profileId),
+          homeDir: toProfileHomeDir(profileId),
+          mounts: profile.mounts.map((mount) => ({
+            ...mount,
+            containerPath: toScopedContainerPath(
+              profileId,
+              mount.containerPath,
+            ),
+          })),
+        },
+      ];
+    },
+  );
 }

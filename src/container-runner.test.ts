@@ -56,31 +56,59 @@ vi.mock('./mount-security.js', () => ({
 }));
 
 vi.mock('./tool-profiles.js', () => ({
-  loadToolProfileRegistry: vi.fn(() => ({
-    'gmail:personal': {
-      tool: 'gmail',
-      mounts: [
-        {
-          hostPath: '/tmp/home/.gmail-mcp-personal',
-          containerPath: '/home/node/.gmail-mcp',
-          readonly: false,
-        },
-      ],
-    },
-    slack: {
-      tool: 'slack',
-      mounts: [
-        {
-          hostPath: '/tmp/home/.slack',
-          containerPath: '/home/node/.slack',
-          readonly: true,
-        },
-      ],
-    },
-  })),
-  resolveAllowedToolProfileIds: vi.fn((_isMain, perms) => {
+  loadToolProfileRegistry: vi.fn(() => ({})),
+  resolveToolProfiles: vi.fn((_isMain, perms) => {
     if (!perms) return [];
-    return [...(perms.mcpServerProfiles ?? []), ...(perms.mcpServers ?? [])];
+
+    const profiles = [];
+    if ((perms.mcpServerProfiles ?? []).includes('gmail:personal')) {
+      profiles.push({
+        profileId: 'gmail:personal',
+        tool: 'gmail',
+        serverName: 'gmail__personal',
+        homeDir: '/home/node/.nanoclaw/tool-profiles/gmail_personal',
+        mounts: [
+          {
+            hostPath: '/tmp/home/.gmail-mcp-personal',
+            containerPath:
+              '/home/node/.nanoclaw/tool-profiles/gmail_personal/.gmail-mcp',
+            readonly: false,
+          },
+        ],
+      });
+    }
+    if ((perms.mcpServerProfiles ?? []).includes('gmail:work')) {
+      profiles.push({
+        profileId: 'gmail:work',
+        tool: 'gmail',
+        serverName: 'gmail__work',
+        homeDir: '/home/node/.nanoclaw/tool-profiles/gmail_work',
+        mounts: [
+          {
+            hostPath: '/tmp/home/.gmail-mcp-work',
+            containerPath:
+              '/home/node/.nanoclaw/tool-profiles/gmail_work/.gmail-mcp',
+            readonly: false,
+          },
+        ],
+      });
+    }
+    if ((perms.mcpServers ?? []).includes('slack')) {
+      profiles.push({
+        profileId: 'slack',
+        tool: 'slack',
+        serverName: 'slack__default',
+        homeDir: '/home/node/.nanoclaw/tool-profiles/slack',
+        mounts: [
+          {
+            hostPath: '/tmp/home/.slack',
+            containerPath: '/home/node/.nanoclaw/tool-profiles/slack/.slack',
+            readonly: true,
+          },
+        ],
+      });
+    }
+    return profiles;
   }),
 }));
 
@@ -278,14 +306,15 @@ describe('container-runner tool profiles', () => {
       mounts.some(
         (m) =>
           m.hostPath === '/tmp/home/.gmail-mcp-personal' &&
-          m.containerPath === '/home/node/.gmail-mcp',
+          m.containerPath ===
+            '/home/node/.nanoclaw/tool-profiles/gmail_personal/.gmail-mcp',
       ),
     ).toBe(true);
     expect(
       mounts.some(
         (m) =>
           m.hostPath === '/tmp/home/.slack' &&
-          m.containerPath === '/home/node/.slack',
+          m.containerPath === '/home/node/.nanoclaw/tool-profiles/slack/.slack',
       ),
     ).toBe(false);
   });
@@ -313,7 +342,46 @@ describe('container-runner tool profiles', () => {
       mounts.some(
         (m) =>
           m.hostPath === '/tmp/home/.slack' &&
-          m.containerPath === '/home/node/.slack',
+          m.containerPath === '/home/node/.nanoclaw/tool-profiles/slack/.slack',
+      ),
+    ).toBe(true);
+  });
+
+  it('mounts two profiles of the same MCP family to distinct container paths', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p) =>
+        p === '/tmp/home/.gmail-mcp-personal' ||
+        p === '/tmp/home/.gmail-mcp-work',
+    );
+    const group: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: {
+        toolPermissions: {
+          mcpServerProfiles: ['gmail:personal', 'gmail:work'],
+        },
+      },
+    };
+
+    const mounts = buildVolumeMounts(
+      group,
+      false,
+      group.containerConfig?.toolPermissions,
+    );
+
+    expect(
+      mounts.some(
+        (m) =>
+          m.hostPath === '/tmp/home/.gmail-mcp-personal' &&
+          m.containerPath ===
+            '/home/node/.nanoclaw/tool-profiles/gmail_personal/.gmail-mcp',
+      ),
+    ).toBe(true);
+    expect(
+      mounts.some(
+        (m) =>
+          m.hostPath === '/tmp/home/.gmail-mcp-work' &&
+          m.containerPath ===
+            '/home/node/.nanoclaw/tool-profiles/gmail_work/.gmail-mcp',
       ),
     ).toBe(true);
   });

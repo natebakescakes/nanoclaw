@@ -16,12 +16,23 @@
 
 import fs from 'fs';
 import path from 'path';
-import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import {
+  query,
+  HookCallback,
+  PreCompactHookInput,
+} from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 
 interface ToolPermissions {
   mcpServers?: string[];
   mcpServerProfiles?: string[];
+}
+
+interface ResolvedToolProfile {
+  profileId: string;
+  tool: string;
+  serverName: string;
+  homeDir: string;
 }
 
 interface ImageAttachment {
@@ -54,6 +65,7 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   toolPermissions?: ToolPermissions;
+  resolvedToolProfiles?: ResolvedToolProfile[];
   images?: ImageAttachment[];
 }
 
@@ -116,7 +128,9 @@ class MessageStream {
         yield this.queue.shift()!;
       }
       if (this.done) return;
-      await new Promise<void>(r => { this.waiting = r; });
+      await new Promise<void>((r) => {
+        this.waiting = r;
+      });
       this.waiting = null;
     }
   }
@@ -126,7 +140,9 @@ async function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
     process.stdin.setEncoding('utf8');
-    process.stdin.on('data', chunk => { data += chunk; });
+    process.stdin.on('data', (chunk) => {
+      data += chunk;
+    });
     process.stdin.on('end', () => resolve(data));
     process.stdin.on('error', reject);
   });
@@ -145,7 +161,10 @@ function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
 
-function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
+function getSessionSummary(
+  sessionId: string,
+  transcriptPath: string,
+): string | null {
   const projectDir = path.dirname(transcriptPath);
   const indexPath = path.join(projectDir, 'sessions-index.json');
 
@@ -155,13 +174,17 @@ function getSessionSummary(sessionId: string, transcriptPath: string): string | 
   }
 
   try {
-    const index: SessionsIndex = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
-    const entry = index.entries.find(e => e.sessionId === sessionId);
+    const index: SessionsIndex = JSON.parse(
+      fs.readFileSync(indexPath, 'utf-8'),
+    );
+    const entry = index.entries.find((e) => e.sessionId === sessionId);
     if (entry?.summary) {
       return entry.summary;
     }
   } catch (err) {
-    log(`Failed to read sessions index: ${err instanceof Error ? err.message : String(err)}`);
+    log(
+      `Failed to read sessions index: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 
   return null;
@@ -200,12 +223,18 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       const filename = `${date}-${name}.md`;
       const filePath = path.join(conversationsDir, filename);
 
-      const markdown = formatTranscriptMarkdown(messages, summary, assistantName);
+      const markdown = formatTranscriptMarkdown(
+        messages,
+        summary,
+        assistantName,
+      );
       fs.writeFileSync(filePath, markdown);
 
       log(`Archived conversation to ${filePath}`);
     } catch (err) {
-      log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
+      log(
+        `Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     return {};
@@ -238,9 +267,12 @@ function parseTranscript(content: string): ParsedMessage[] {
     try {
       const entry = JSON.parse(line);
       if (entry.type === 'user' && entry.message?.content) {
-        const text = typeof entry.message.content === 'string'
-          ? entry.message.content
-          : entry.message.content.map((c: { text?: string }) => c.text || '').join('');
+        const text =
+          typeof entry.message.content === 'string'
+            ? entry.message.content
+            : entry.message.content
+                .map((c: { text?: string }) => c.text || '')
+                .join('');
         if (text) messages.push({ role: 'user', content: text });
       } else if (entry.type === 'assistant' && entry.message?.content) {
         const textParts = entry.message.content
@@ -249,22 +281,26 @@ function parseTranscript(content: string): ParsedMessage[] {
         const text = textParts.join('');
         if (text) messages.push({ role: 'assistant', content: text });
       }
-    } catch {
-    }
+    } catch {}
   }
 
   return messages;
 }
 
-function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | null, assistantName?: string): string {
+function formatTranscriptMarkdown(
+  messages: ParsedMessage[],
+  title?: string | null,
+  assistantName?: string,
+): string {
   const now = new Date();
-  const formatDateTime = (d: Date) => d.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true
-  });
+  const formatDateTime = (d: Date) =>
+    d.toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    });
 
   const lines: string[] = [];
   lines.push(`# ${title || 'Conversation'}`);
@@ -275,10 +311,11 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
   lines.push('');
 
   for (const msg of messages) {
-    const sender = msg.role === 'user' ? 'User' : (assistantName || 'Assistant');
-    const content = msg.content.length > 2000
-      ? msg.content.slice(0, 2000) + '...'
-      : msg.content;
+    const sender = msg.role === 'user' ? 'User' : assistantName || 'Assistant';
+    const content =
+      msg.content.length > 2000
+        ? msg.content.slice(0, 2000) + '...'
+        : msg.content;
     lines.push(`**${sender}**: ${content}`);
     lines.push('');
   }
@@ -291,7 +328,11 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
  */
 function shouldClose(): boolean {
   if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
-    try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL);
+    } catch {
+      /* ignore */
+    }
     return true;
   }
   return false;
@@ -301,13 +342,18 @@ function shouldClose(): boolean {
  * Build a content block array from text + optional images.
  * Images come first so the model sees them before the text context.
  */
-function buildContent(text: string, images?: ImageAttachment[]): string | ContentBlock[] {
+function buildContent(
+  text: string,
+  images?: ImageAttachment[],
+): string | ContentBlock[] {
   if (!images?.length) return text;
   const blocks: ContentBlock[] = [
-    ...images.map((img): ImageBlock => ({
-      type: 'image',
-      source: { type: 'base64', media_type: img.mimeType, data: img.base64 },
-    })),
+    ...images.map(
+      (img): ImageBlock => ({
+        type: 'image',
+        source: { type: 'base64', media_type: img.mimeType, data: img.base64 },
+      }),
+    ),
     { type: 'text', text },
   ];
   return blocks;
@@ -320,8 +366,9 @@ function buildContent(text: string, images?: ImageAttachment[]): string | Conten
 function drainIpcInput(): Array<string | ContentBlock[]> {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
-    const files = fs.readdirSync(IPC_INPUT_DIR)
-      .filter(f => f.endsWith('.json'))
+    const files = fs
+      .readdirSync(IPC_INPUT_DIR)
+      .filter((f) => f.endsWith('.json'))
       .sort();
 
     const messages: Array<string | ContentBlock[]> = [];
@@ -334,8 +381,14 @@ function drainIpcInput(): Array<string | ContentBlock[]> {
           messages.push(buildContent(data.text, data.images));
         }
       } catch (err) {
-        log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
-        try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+        log(
+          `Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        try {
+          fs.unlinkSync(filePath);
+        } catch {
+          /* ignore */
+        }
       }
     }
     return messages;
@@ -363,7 +416,7 @@ function waitForIpcMessage(): Promise<string | ContentBlock[] | null> {
         if (messages.length === 1 || typeof first !== 'string') {
           resolve(first);
         } else {
-          resolve(messages.filter(m => typeof m === 'string').join('\n'));
+          resolve(messages.filter((m) => typeof m === 'string').join('\n'));
         }
         return;
       }
@@ -383,8 +436,113 @@ function mcpAllowed(name: string, containerInput: ContainerInput): boolean {
     return true;
   }
   return (containerInput.toolPermissions?.mcpServerProfiles ?? []).some(
-    profileId => profileId === name || profileId.startsWith(`${name}:`),
+    (profileId) => profileId === name || profileId.startsWith(`${name}:`),
   );
+}
+
+function getAllowedToolProfiles(
+  containerInput: ContainerInput,
+): ResolvedToolProfile[] {
+  return (containerInput.resolvedToolProfiles ?? []).filter(
+    (profile) =>
+      containerInput.isMain || mcpAllowed(profile.tool, containerInput),
+  );
+}
+
+function buildProfileMcpServerConfig(profile: ResolvedToolProfile): {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+} | null {
+  switch (profile.tool) {
+    case 'gmail':
+      return {
+        command: 'npx',
+        args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
+        env: {
+          HOME: profile.homeDir,
+        },
+      };
+    case 'google-calendar':
+      return {
+        command: 'npx',
+        args: ['-y', '@cocal/google-calendar-mcp'],
+        env: {
+          HOME: profile.homeDir,
+          GOOGLE_OAUTH_CREDENTIALS: path.join(
+            profile.homeDir,
+            '.gcal-mcp',
+            'gcp-oauth.keys.json',
+          ),
+          GOOGLE_CALENDAR_MCP_TOKEN_PATH: path.join(
+            profile.homeDir,
+            '.config',
+            'google-calendar-mcp',
+            'tokens.json',
+          ),
+        },
+      };
+    case 'google-tasks-vrob':
+      return {
+        command: 'npx',
+        args: ['-y', 'mcp-googletasks-vrob'],
+        env: {
+          HOME: profile.homeDir,
+          GOOGLE_CLIENT_ID: process.env.GOOGLE_TASKS_CLIENT_ID ?? '',
+          GOOGLE_CLIENT_SECRET: process.env.GOOGLE_TASKS_CLIENT_SECRET ?? '',
+        },
+      };
+    case 'littlelives':
+      return {
+        command: 'node',
+        args: [path.join(profile.homeDir, '.littlelives', 'mcp.js')],
+        env: {
+          HOME: profile.homeDir,
+        },
+      };
+    case 'ynab':
+      return {
+        command: 'node',
+        args: [path.join(profile.homeDir, '.ynab', 'mcp.js')],
+        env: {
+          HOME: profile.homeDir,
+        },
+      };
+    case 'trakt':
+      return {
+        command: 'node',
+        args: [path.join(profile.homeDir, '.trakt', 'mcp.js')],
+        env: {
+          HOME: profile.homeDir,
+        },
+      };
+    case 'ibkr':
+      return {
+        command: 'node',
+        args: [path.join(profile.homeDir, '.ibkr', 'mcp.js')],
+        env: {
+          HOME: profile.homeDir,
+        },
+      };
+    case 'notion':
+      return {
+        command: 'npx',
+        args: ['-y', 'mcp-remote', 'https://mcp.notion.com/mcp'],
+        env: {
+          HOME: profile.homeDir,
+        },
+      };
+    case 'slack':
+      return {
+        command: 'node',
+        args: [path.join(profile.homeDir, '.slack', 'mcp.js')],
+        env: {
+          HOME: profile.homeDir,
+        },
+      };
+    default:
+      return null;
+  }
 }
 
 /**
@@ -400,7 +558,11 @@ async function runQuery(
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
-): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
+): Promise<{
+  newSessionId?: string;
+  lastAssistantUuid?: string;
+  closedDuringQuery: boolean;
+}> {
   const stream = new MessageStream();
   stream.push(prompt);
 
@@ -454,6 +616,17 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
+  const allowedToolProfiles = getAllowedToolProfiles(containerInput);
+  const allowedToolPatterns = allowedToolProfiles.map(
+    (profile) => `mcp__${profile.serverName}__*`,
+  );
+  const externalMcpServers = Object.fromEntries(
+    allowedToolProfiles.flatMap((profile) => {
+      const config = buildProfileMcpServerConfig(profile);
+      return config ? [[profile.serverName, config]] : [];
+    }),
+  );
+
   for await (const message of query({
     prompt: stream,
     options: {
@@ -462,26 +635,33 @@ async function runQuery(
       resume: sessionId,
       resumeSessionAt: resumeAt,
       systemPrompt: globalClaudeMd
-        ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
+        ? {
+            type: 'preset' as const,
+            preset: 'claude_code' as const,
+            append: globalClaudeMd,
+          }
         : undefined,
       allowedTools: [
         'Bash',
-        'Read', 'Write', 'Edit', 'Glob', 'Grep',
-        'WebSearch', 'WebFetch',
-        'Task', 'TaskOutput', 'TaskStop',
-        'TeamCreate', 'TeamDelete', 'SendMessage',
-        'TodoWrite', 'ToolSearch', 'Skill',
+        'Read',
+        'Write',
+        'Edit',
+        'Glob',
+        'Grep',
+        'WebSearch',
+        'WebFetch',
+        'Task',
+        'TaskOutput',
+        'TaskStop',
+        'TeamCreate',
+        'TeamDelete',
+        'SendMessage',
+        'TodoWrite',
+        'ToolSearch',
+        'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
-        ...(mcpAllowed('gmail', containerInput) ? ['mcp__gmail__*'] : []),
-        ...(mcpAllowed('google-calendar', containerInput) ? ['mcp__google-calendar__*'] : []),
-        ...(mcpAllowed('google-tasks-vrob', containerInput) ? ['mcp__google-tasks-vrob__*'] : []),
-        ...(mcpAllowed('littlelives', containerInput) ? ['mcp__littlelives__*'] : []),
-        ...(mcpAllowed('ynab', containerInput) ? ['mcp__ynab__*'] : []),
-        ...(mcpAllowed('trakt', containerInput) ? ['mcp__trakt__*'] : []),
-        ...(mcpAllowed('ibkr', containerInput) ? ['mcp__ibkr__*'] : []),
-        ...(mcpAllowed('notion', containerInput) ? ['mcp__notion__*'] : []),
-        ...(mcpAllowed('slack', containerInput) ? ['mcp__slack__*'] : []),
+        ...allowedToolPatterns,
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -497,76 +677,20 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
-        ...(mcpAllowed('gmail', containerInput) ? {
-          gmail: {
-            command: 'npx',
-            args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
-          },
-        } : {}),
-        ...(mcpAllowed('google-calendar', containerInput) ? {
-          'google-calendar': {
-            command: 'npx',
-            args: ['-y', '@cocal/google-calendar-mcp'],
-            env: {
-              GOOGLE_OAUTH_CREDENTIALS: '/home/node/.gcal-mcp/gcp-oauth.keys.json',
-              GOOGLE_CALENDAR_MCP_TOKEN_PATH: '/home/node/.config/google-calendar-mcp/tokens.json',
-            },
-          },
-        } : {}),
-        ...(mcpAllowed('google-tasks-vrob', containerInput) ? {
-          'google-tasks-vrob': {
-            command: 'npx',
-            args: ['-y', 'mcp-googletasks-vrob'],
-            env: {
-              GOOGLE_CLIENT_ID: process.env.GOOGLE_TASKS_CLIENT_ID ?? '',
-              GOOGLE_CLIENT_SECRET: process.env.GOOGLE_TASKS_CLIENT_SECRET ?? '',
-            },
-          },
-        } : {}),
-        ...(mcpAllowed('littlelives', containerInput) ? {
-          littlelives: {
-            command: 'node',
-            args: ['/home/node/.littlelives/mcp.js'],
-          },
-        } : {}),
-        ...(mcpAllowed('ynab', containerInput) ? {
-          ynab: {
-            command: 'node',
-            args: ['/home/node/.ynab/mcp.js'],
-          },
-        } : {}),
-        ...(mcpAllowed('trakt', containerInput) ? {
-          trakt: {
-            command: 'node',
-            args: ['/home/node/.trakt/mcp.js'],
-          },
-        } : {}),
-        ...(mcpAllowed('ibkr', containerInput) ? {
-          ibkr: {
-            command: 'node',
-            args: ['/home/node/.ibkr/mcp.js'],
-          },
-        } : {}),
-        ...(mcpAllowed('notion', containerInput) ? {
-          notion: {
-            command: 'npx',
-            args: ['-y', 'mcp-remote', 'https://mcp.notion.com/mcp'],
-          },
-        } : {}),
-        ...(mcpAllowed('slack', containerInput) ? {
-          slack: {
-            command: 'node',
-            args: ['/home/node/.slack/mcp.js'],
-          },
-        } : {}),
+        ...externalMcpServers,
       },
       hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+        PreCompact: [
+          { hooks: [createPreCompactHook(containerInput.assistantName)] },
+        ],
       },
-    }
+    },
   })) {
     messageCount++;
-    const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
+    const msgType =
+      message.type === 'system'
+        ? `system/${(message as { subtype?: string }).subtype}`
+        : message.type;
     log(`[msg #${messageCount}] type=${msgType}`);
 
     if (message.type === 'assistant' && 'uuid' in message) {
@@ -578,19 +702,31 @@ async function runQuery(
       log(`Session initialized: ${newSessionId}`);
     }
 
-    if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
-      const tn = message as { task_id: string; status: string; summary: string };
-      log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
+    if (
+      message.type === 'system' &&
+      (message as { subtype?: string }).subtype === 'task_notification'
+    ) {
+      const tn = message as {
+        task_id: string;
+        status: string;
+        summary: string;
+      };
+      log(
+        `Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`,
+      );
     }
 
     if (message.type === 'result') {
       resultCount++;
-      const textResult = 'result' in message ? (message as { result?: string }).result : null;
-      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+      const textResult =
+        'result' in message ? (message as { result?: string }).result : null;
+      log(
+        `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
+      );
       writeOutput({
         status: 'success',
         result: textResult || null,
-        newSessionId
+        newSessionId,
       });
       // End the stream after each result so the query finishes cleanly.
       // The main loop will restart runQuery() for the next message, giving
@@ -601,7 +737,9 @@ async function runQuery(
   }
 
   ipcPolling = false;
-  log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`);
+  log(
+    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
+  );
   return { newSessionId, lastAssistantUuid, closedDuringQuery };
 }
 
@@ -611,13 +749,17 @@ async function main(): Promise<void> {
   try {
     const stdinData = await readStdin();
     containerInput = JSON.parse(stdinData);
-    try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
+    try {
+      fs.unlinkSync('/tmp/input.json');
+    } catch {
+      /* may not exist */
+    }
     log(`Received input for group: ${containerInput.groupFolder}`);
   } catch (err) {
     writeOutput({
       status: 'error',
       result: null,
-      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`
+      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`,
     });
     process.exit(1);
   }
@@ -633,7 +775,11 @@ async function main(): Promise<void> {
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
 
   // Clean up stale _close sentinel from previous container runs
-  try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
+  try {
+    fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL);
+  } catch {
+    /* ignore */
+  }
 
   // Build initial prompt (drain any pending IPC messages too)
   let promptText = containerInput.prompt;
@@ -648,15 +794,27 @@ async function main(): Promise<void> {
     if (textParts.length > 0) promptText += '\n' + textParts.join('\n');
   }
   // prompt is string | ContentBlock[] depending on whether images are attached
-  let prompt: string | ContentBlock[] = buildContent(promptText, containerInput.images);
+  let prompt: string | ContentBlock[] = buildContent(
+    promptText,
+    containerInput.images,
+  );
 
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;
   try {
     while (true) {
-      log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
+      log(
+        `Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`,
+      );
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult = await runQuery(
+        prompt,
+        sessionId,
+        mcpServerPath,
+        containerInput,
+        sdkEnv,
+        resumeAt,
+      );
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
@@ -694,7 +852,7 @@ async function main(): Promise<void> {
       status: 'error',
       result: null,
       newSessionId: sessionId,
-      error: errorMessage
+      error: errorMessage,
     });
     process.exit(1);
   }

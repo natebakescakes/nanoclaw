@@ -15,6 +15,7 @@ import {
   getBuiltinToolProfiles,
   loadToolProfileRegistry,
   resolveAllowedToolProfileIds,
+  resolveToolProfiles,
 } from './tool-profiles.js';
 
 describe('tool profile resolution', () => {
@@ -66,6 +67,52 @@ describe('tool profile resolution', () => {
         registry,
       ),
     ).toEqual(['gmail:personal']);
+  });
+
+  it('resolves same-family profiles to distinct server names and container homes', () => {
+    const registry = {
+      'gmail:personal': {
+        tool: 'gmail',
+        mounts: [
+          {
+            hostPath: '/tmp/home/.gmail-mcp-personal',
+            containerPath: '/home/node/.gmail-mcp',
+            readonly: false,
+          },
+        ],
+      },
+      'gmail:work': {
+        tool: 'gmail',
+        mounts: [
+          {
+            hostPath: '/tmp/home/.gmail-mcp-work',
+            containerPath: '/home/node/.gmail-mcp',
+            readonly: false,
+          },
+        ],
+      },
+    };
+
+    const profiles = resolveToolProfiles(
+      false,
+      { mcpServerProfiles: ['gmail:personal', 'gmail:work'] },
+      registry,
+    );
+
+    expect(profiles.map((profile) => profile.serverName).sort()).toEqual([
+      'gmail__personal',
+      'gmail__work',
+    ]);
+    expect(profiles.map((profile) => profile.homeDir).sort()).toEqual([
+      '/home/node/.nanoclaw/tool-profiles/gmail_personal',
+      '/home/node/.nanoclaw/tool-profiles/gmail_work',
+    ]);
+    expect(
+      profiles.map((profile) => profile.mounts[0]?.containerPath).sort(),
+    ).toEqual([
+      '/home/node/.nanoclaw/tool-profiles/gmail_personal/.gmail-mcp',
+      '/home/node/.nanoclaw/tool-profiles/gmail_work/.gmail-mcp',
+    ]);
   });
 
   it('loads custom scoped profiles from config file', () => {

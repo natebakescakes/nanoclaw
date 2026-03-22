@@ -31,7 +31,8 @@ import { detectAuthMode } from './credential-proxy.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import {
   loadToolProfileRegistry,
-  resolveAllowedToolProfileIds,
+  resolveToolProfiles,
+  ResolvedToolProfile,
 } from './tool-profiles.js';
 import { RegisteredGroup, ToolPermissions } from './types.js';
 
@@ -48,6 +49,7 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   toolPermissions?: ToolPermissions;
+  resolvedToolProfiles?: ResolvedToolProfile[];
   /** Base64-encoded images to send as multimodal content with the prompt. */
   images?: { base64: string; mimeType: string }[];
 }
@@ -183,16 +185,14 @@ export function buildVolumeMounts(
   });
 
   const registry = loadToolProfileRegistry();
-  const allowedProfiles = resolveAllowedToolProfileIds(
+  const resolvedProfiles = resolveToolProfiles(
     isMain,
     toolPermissions,
     registry,
   );
   const seenMounts = new Set<string>();
 
-  for (const profileId of allowedProfiles) {
-    const profile = registry[profileId];
-    if (!profile) continue;
+  for (const profile of resolvedProfiles) {
     for (const mount of profile.mounts) {
       if (mount.create) {
         fs.mkdirSync(mount.hostPath, { recursive: true });
@@ -341,6 +341,12 @@ export async function runContainerAgent(
     input.isMain,
     group.containerConfig?.toolPermissions,
   );
+  const registry = loadToolProfileRegistry();
+  const resolvedToolProfiles = resolveToolProfiles(
+    input.isMain,
+    group.containerConfig?.toolPermissions,
+    registry,
+  );
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
@@ -383,7 +389,12 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    container.stdin.write(JSON.stringify(input));
+    container.stdin.write(
+      JSON.stringify({
+        ...input,
+        resolvedToolProfiles,
+      }),
+    );
     container.stdin.end();
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
