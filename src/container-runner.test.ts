@@ -291,7 +291,9 @@ describe('container-runner tool profiles', () => {
   });
 
   it('legacy tool allowlist still mounts matching default tool profile', () => {
-    vi.mocked(fs.existsSync).mockImplementation((p) => p === '/tmp/home/.slack');
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p) => p === '/tmp/home/.slack',
+    );
     const group: RegisteredGroup = {
       ...testGroup,
       containerConfig: {

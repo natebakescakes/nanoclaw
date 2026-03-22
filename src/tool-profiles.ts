@@ -165,9 +165,9 @@ export function loadToolProfileRegistry(
   if (!fs.existsSync(configPath)) return registry;
 
   try {
-    const raw = JSON.parse(
-      fs.readFileSync(configPath, 'utf-8'),
-    ) as ToolProfilesConfigFile | Record<string, unknown>;
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as
+      | ToolProfilesConfigFile
+      | Record<string, unknown>;
     const profiles =
       'profiles' in raw && raw.profiles && typeof raw.profiles === 'object'
         ? raw.profiles
@@ -181,10 +181,10 @@ export function loadToolProfileRegistry(
         tool: definition.tool || inferToolFromProfileId(profileId),
         mounts: definition.mounts.map(
           (mount: NonNullable<typeof definition.mounts>[number]) => ({
-          hostPath: expandHome(mount.hostPath, homeDir),
-          containerPath: mount.containerPath,
-          readonly: mount.readonly ?? true,
-          create: mount.create ?? false,
+            hostPath: expandHome(mount.hostPath, homeDir),
+            containerPath: mount.containerPath,
+            readonly: mount.readonly ?? true,
+            create: mount.create ?? false,
           }),
         ),
       };
@@ -205,7 +205,11 @@ export function resolveAllowedToolProfileIds(
   registry: ToolProfileRegistry,
 ): string[] {
   const availableIds = Object.keys(registry);
-  if (isMain && !perms?.mcpServers?.length && !perms?.mcpServerProfiles?.length) {
+  if (
+    isMain &&
+    !perms?.mcpServers?.length &&
+    !perms?.mcpServerProfiles?.length
+  ) {
     return availableIds;
   }
 

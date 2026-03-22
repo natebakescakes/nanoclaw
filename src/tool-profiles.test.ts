@@ -20,7 +20,9 @@ import {
 describe('tool profile resolution', () => {
   it('non-main group with no permissions gets no external profiles', () => {
     const registry = getBuiltinToolProfiles('/tmp/home');
-    expect(resolveAllowedToolProfileIds(false, undefined, registry)).toEqual([]);
+    expect(resolveAllowedToolProfileIds(false, undefined, registry)).toEqual(
+      [],
+    );
   });
 
   it('main group with no permissions gets all configured profiles', () => {
