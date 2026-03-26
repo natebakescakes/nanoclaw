@@ -357,46 +357,49 @@ export class TelegramChannel implements Channel {
       }
 
       // Telegram returns photos ascending by size; pick the largest ≤ 1280px wide
-      const photos = ctx.message.photo;
+      const photos = ctx.message.photo ?? [];
       const photo =
-        [...photos].reverse().find((p) => p.width <= 1280) ??
-        photos[photos.length - 1];
+        Array.from(photos)
+          .reverse()
+          .find((p) => p.width <= 1280) ?? photos[photos.length - 1];
 
       let content = `${replyPrefix}[Photo]${caption}`;
       let images: ImageAttachment[] | undefined;
 
-      try {
-        const fileInfo = await ctx.api.getFile(photo.file_id);
-        if (fileInfo.file_path) {
-          const tmpFile = await downloadTelegramFile(
-            this.botToken,
-            fileInfo.file_path,
-          );
-          if (tmpFile) {
-            try {
-              // Save to attachments/ for later reference
-              const groupDir = resolveGroupFolderPath(group.folder);
-              const attachmentsDir = path.join(groupDir, 'attachments');
-              await mkdir(attachmentsDir, { recursive: true });
-              const ext = path.extname(fileInfo.file_path) || '.jpg';
-              const fileName = `photo-${ctx.message.message_id}${ext}`;
-              const destPath = path.join(attachmentsDir, fileName);
-              await copyFile(tmpFile, destPath);
+      if (photo) {
+        try {
+          const fileInfo = await ctx.api.getFile(photo.file_id);
+          if (fileInfo.file_path) {
+            const tmpFile = await downloadTelegramFile(
+              this.botToken,
+              fileInfo.file_path,
+            );
+            if (tmpFile) {
+              try {
+                // Save to attachments/ for later reference
+                const groupDir = resolveGroupFolderPath(group.folder);
+                const attachmentsDir = path.join(groupDir, 'attachments');
+                await mkdir(attachmentsDir, { recursive: true });
+                const ext = path.extname(fileInfo.file_path) || '.jpg';
+                const fileName = `photo-${ctx.message.message_id}${ext}`;
+                const destPath = path.join(attachmentsDir, fileName);
+                await copyFile(tmpFile, destPath);
 
-              // Encode as base64 for immediate vision
-              const buf = await readFile(destPath);
-              images = [
-                { base64: buf.toString('base64'), mimeType: 'image/jpeg' },
-              ];
-              content = `${replyPrefix}[Photo: saved to attachments/${fileName}]${caption}`;
-              logger.info({ chatJid, fileName }, 'Photo attachment saved');
-            } finally {
-              await unlink(tmpFile).catch(() => {});
+                // Encode as base64 for immediate vision
+                const buf = await readFile(destPath);
+                images = [
+                  { base64: buf.toString('base64'), mimeType: 'image/jpeg' },
+                ];
+                content = `${replyPrefix}[Photo: saved to attachments/${fileName}]${caption}`;
+                logger.info({ chatJid, fileName }, 'Photo attachment saved');
+              } finally {
+                await unlink(tmpFile).catch(() => {});
+              }
             }
           }
+        } catch (err) {
+          logger.warn({ err }, 'Photo download failed, using placeholder');
         }
-      } catch (err) {
-        logger.warn({ err }, 'Photo download failed, using placeholder');
       }
 
       this.opts.onMessage(chatJid, {

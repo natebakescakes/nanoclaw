@@ -636,7 +636,7 @@ describe('TelegramChannel', () => {
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ content: '[Document: report.pdf]' }),
+        expect.objectContaining({ content: '[PDF: report.pdf]' }),
       );
     });
 
@@ -650,7 +650,7 @@ describe('TelegramChannel', () => {
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ content: '[Document: file]' }),
+        expect.objectContaining({ content: '[Document: document]' }),
       );
     });
 

@@ -62,21 +62,25 @@ function inferToolFromProfileId(profileId: string): string {
 function findGwsBinaryPath(homeDir: string): string {
   // Scan NVM versions for the @googleworkspace/cli native binary
   const nvmDir = path.join(homeDir, '.nvm', 'versions', 'node');
-  if (fs.existsSync(nvmDir)) {
-    for (const ver of fs.readdirSync(nvmDir)) {
-      const candidate = path.join(
-        nvmDir,
-        ver,
-        'lib',
-        'node_modules',
-        '@googleworkspace',
-        'cli',
-        'node_modules',
-        '.bin_real',
-        'gws',
-      );
-      if (fs.existsSync(candidate)) return candidate;
+  try {
+    if (fs.existsSync(nvmDir) && fs.statSync(nvmDir).isDirectory()) {
+      for (const ver of fs.readdirSync(nvmDir)) {
+        const candidate = path.join(
+          nvmDir,
+          ver,
+          'lib',
+          'node_modules',
+          '@googleworkspace',
+          'cli',
+          'node_modules',
+          '.bin_real',
+          'gws',
+        );
+        if (fs.existsSync(candidate)) return candidate;
+      }
     }
+  } catch {
+    // Ignore missing or inaccessible NVM directories and fall through to other probes.
   }
   // Check local bin
   const localBin = path.join(homeDir, '.local', 'bin', 'gws');

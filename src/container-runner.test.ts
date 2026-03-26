@@ -463,6 +463,9 @@ describe('container-runner MCP secrets', () => {
 
   it('passes the Ahrefs MCP key into the container environment', async () => {
     const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+    while (vi.mocked(spawn).mock.calls.length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
     emitOutputMarker(fakeProc, {
       status: 'success',
       result: 'ok',
