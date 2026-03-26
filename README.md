@@ -60,7 +60,15 @@ claude
 
 Then run `/setup`. Claude Code handles everything: dependencies, authentication, container setup and service configuration.
 
-> **Note:** Commands prefixed with `/` (like `/setup`, `/add-whatsapp`) are [Claude Code skills](https://code.claude.com/docs/en/skills). Type them inside the `claude` CLI prompt, not in your regular terminal. If you don't have Claude Code installed, get it at [claude.com/product/claude-code](https://claude.com/product/claude-code).
+> **Note:** This repo ships agent skills as `SKILL.md` packages under `container/skills/`. In Claude Code they can be invoked as slash commands when installed; in Codex they are ordinary skills discovered from `~/.codex/skills`. The bundled utility skills are written to work in either environment.
+
+If you are using Codex instead of Claude Code, install NanoClaw's repo-local skills into your Codex skill directory:
+
+```bash
+npm run skills:codex
+```
+
+That syncs [`/.claude/skills`](./.claude/skills) and [`container/skills`](./container/skills) into `~/.codex/skills` so skills such as `add-telegram` and `add-voice-transcription` are available to future Codex sessions.
 
 ## Philosophy
 
@@ -208,7 +216,7 @@ Ask Claude Code. "Why isn't the scheduler running?" "What's in the recent logs?"
 
 **Why isn't the setup working for me?**
 
-If you have issues, during setup, Claude will try to dynamically fix them. If that doesn't work, run `claude`, then run `/debug`. If Claude finds an issue that is likely affecting other users, open a PR to modify the setup SKILL.md.
+If you have issues, ask the coding agent you are using to inspect the setup and run the repo's debugging workflow. If you find a repo-wide issue, open a PR updating the relevant `SKILL.md`.
 
 **What changes will be accepted into the codebase?**
 

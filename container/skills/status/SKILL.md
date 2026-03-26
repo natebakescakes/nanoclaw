@@ -1,9 +1,9 @@
 ---
 name: status
-description: Quick read-only health check — session context, workspace mounts, tool availability, and task snapshot. Use when the user asks for system status or runs /status.
+description: Quick read-only health check — session context, workspace mounts, tool availability, and task snapshot. Use when the user asks for system status or wants a quick health check.
 ---
 
-# /status — System Status Check
+# Status Check
 
 Generate a quick read-only status report of the current agent environment.
 
@@ -50,7 +50,7 @@ Confirm which tool families are available to you:
 - **Core:** Bash, Read, Write, Edit, Glob, Grep
 - **Web:** WebSearch, WebFetch
 - **Orchestration:** Task, TaskOutput, TaskStop, TeamCreate, TeamDelete, SendMessage
-- **MCP:** mcp__nanoclaw__* (send_message, schedule_task, list_tasks, pause_task, resume_task, cancel_task, update_task, register_group)
+- **MCP or equivalent integration tools:** send_message, schedule_task, list_tasks, pause_task, resume_task, cancel_task, update_task, register_group
 
 ### 4. Container utilities
 
@@ -58,15 +58,14 @@ Confirm which tool families are available to you:
 which agent-browser 2>/dev/null && echo "agent-browser: available" || echo "agent-browser: not installed"
 node --version 2>/dev/null
 claude --version 2>/dev/null
+codex --version 2>/dev/null
 ```
 
 ### 5. Task snapshot
 
-Use the MCP tool to list tasks:
+Use the NanoClaw task-listing tool available in the current agent runtime to list tasks.
 
-```
-Call mcp__nanoclaw__list_tasks to get scheduled tasks.
-```
+If no task tool is available, say that task inspection is unavailable in this environment.
 
 If no tasks exist, report "No scheduled tasks."
 
@@ -94,6 +93,7 @@ Present as a clean, readable message:
 • agent-browser: ✓ / not installed
 • Node: vXX.X.X
 • Claude Code: vX.X.X
+• Codex CLI: vX.X.X
 
 *Scheduled Tasks:*
 • N active tasks / No scheduled tasks
@@ -101,4 +101,4 @@ Present as a clean, readable message:
 
 Adapt based on what you actually find. Keep it concise — this is a quick health check, not a deep diagnostic.
 
-**See also:** `/capabilities` for a full list of installed skills and tools.
+**See also:** `capabilities` for a full list of installed skills and tools.

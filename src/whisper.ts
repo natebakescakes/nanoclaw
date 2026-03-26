@@ -1,17 +1,122 @@
 import { createWriteStream, unlink } from 'fs';
 import https from 'https';
-import { mkdtemp, readFile, rm } from 'fs/promises';
+import { access, mkdtemp, readFile, rm } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
+import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
 const execFileAsync = promisify(execFile);
+const envConfig = readEnvFile([
+  'FFMPEG_BIN',
+  'WHISPER_BIN',
+  'WHISPER_CPP_BIN',
+  'WHISPER_LANGUAGE',
+  'WHISPER_MODEL',
+  'WHISPER_MODEL_DIR',
+  'WHISPER_MODEL_PATH',
+  'WHISPER_THREADS',
+]);
 
-const WHISPER_MODEL = process.env.WHISPER_MODEL || 'small';
 const WHISPER_TIMEOUT = 120_000; // 2 minutes
+
+const MODEL_FILENAMES: Record<string, string> = {
+  tiny: 'ggml-tiny.bin',
+  'tiny.en': 'ggml-tiny.en.bin',
+  base: 'ggml-base.bin',
+  'base.en': 'ggml-base.en.bin',
+  small: 'ggml-small.bin',
+  'small.en': 'ggml-small.en.bin',
+  medium: 'ggml-medium.bin',
+  'medium.en': 'ggml-medium.en.bin',
+  'large-v1': 'ggml-large-v1.bin',
+  'large-v2': 'ggml-large-v2.bin',
+  'large-v3': 'ggml-large-v3.bin',
+  large: 'ggml-large-v3.bin',
+  'large-v3-turbo': 'ggml-large-v3-turbo.bin',
+  turbo: 'ggml-large-v3-turbo.bin',
+};
+
+function getConfigValue(key: keyof typeof envConfig): string | undefined {
+  return process.env[key] || envConfig[key];
+}
+
+export function resolveWhisperBin(configuredBin?: string): string {
+  if (!configuredBin) return 'whisper-cli';
+
+  const baseName = path.basename(configuredBin);
+  if (baseName === 'whisper' || baseName === 'whisper.exe') {
+    return 'whisper-cli';
+  }
+
+  return configuredBin;
+}
+
+export function resolveModelFilename(model: string): string {
+  if (model.includes(path.sep) || model.endsWith('.bin')) return model;
+  return MODEL_FILENAMES[model] || model;
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveWhisperModelPath(model: string): Promise<string> {
+  const configuredModelPath = getConfigValue('WHISPER_MODEL_PATH');
+  if (configuredModelPath) return configuredModelPath;
+
+  const modelRef = resolveModelFilename(model);
+  if (path.isAbsolute(modelRef) || modelRef.includes(path.sep)) {
+    return modelRef;
+  }
+
+  const configuredModelDir = getConfigValue('WHISPER_MODEL_DIR');
+  const candidateDirs = [
+    configuredModelDir,
+    path.join(process.cwd(), 'models'),
+    path.join(process.cwd(), 'whisper.cpp', 'models'),
+    path.join(os.homedir(), '.local', 'share', 'whisper.cpp', 'models'),
+    path.join(os.homedir(), '.cache', 'whisper.cpp'),
+  ].filter((dir): dir is string => Boolean(dir));
+
+  for (const dir of candidateDirs) {
+    const candidate = path.join(dir, modelRef);
+    if (await pathExists(candidate)) return candidate;
+  }
+
+  throw new Error(
+    `whisper.cpp model not found: ${modelRef}. Set WHISPER_MODEL_PATH or WHISPER_MODEL_DIR.`,
+  );
+}
+
+async function normalizeAudio(inputPath: string, outputPath: string): Promise<void> {
+  const ffmpegBin = getConfigValue('FFMPEG_BIN') || 'ffmpeg';
+  await execFileAsync(
+    ffmpegBin,
+    [
+      '-nostdin',
+      '-y',
+      '-i',
+      inputPath,
+      '-ar',
+      '16000',
+      '-ac',
+      '1',
+      '-c:a',
+      'pcm_s16le',
+      outputPath,
+    ],
+    { timeout: WHISPER_TIMEOUT },
+  );
+}
 
 /**
  * Download a file from Telegram's file CDN into a temp file.
@@ -45,7 +150,7 @@ export async function downloadTelegramFile(
 }
 
 /**
- * Transcribe an audio file using the local `whisper` CLI.
+ * Transcribe an audio file using local whisper.cpp.
  * Returns trimmed transcript text, or null if transcription fails.
  */
 export async function transcribeAudio(
@@ -53,25 +158,44 @@ export async function transcribeAudio(
 ): Promise<string | null> {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'whisper-out-'));
   try {
-    const whisperBin = process.env.WHISPER_BIN || 'whisper';
+    const whisperModel = getConfigValue('WHISPER_MODEL') || 'small';
+    const whisperLanguage = getConfigValue('WHISPER_LANGUAGE');
+    const whisperThreads = getConfigValue('WHISPER_THREADS');
+    const whisperBin = resolveWhisperBin(
+      getConfigValue('WHISPER_CPP_BIN') || getConfigValue('WHISPER_BIN'),
+    );
+    const modelPath = await resolveWhisperModelPath(whisperModel);
+    const normalizedAudioPath = path.join(tmpDir, 'input.wav');
+    const outputPrefix = path.join(
+      tmpDir,
+      path.basename(filePath, path.extname(filePath)),
+    );
+
+    await normalizeAudio(filePath, normalizedAudioPath);
+
+    const args = [
+      '-m',
+      modelPath,
+      '-f',
+      normalizedAudioPath,
+      '-otxt',
+      '-of',
+      outputPrefix,
+    ];
+    if (whisperLanguage) {
+      args.push('-l', whisperLanguage);
+    }
+    if (whisperThreads) {
+      args.push('-t', whisperThreads);
+    }
+
     await execFileAsync(
       whisperBin,
-      [
-        filePath,
-        '--model',
-        WHISPER_MODEL,
-        '--output_format',
-        'txt',
-        '--output_dir',
-        tmpDir,
-        '--fp16',
-        'False', // CPU-safe: disable fp16 so it doesn't crash on non-GPU
-      ],
+      args,
       { timeout: WHISPER_TIMEOUT },
     );
 
-    const baseName = path.basename(filePath, path.extname(filePath));
-    const txtPath = path.join(tmpDir, `${baseName}.txt`);
+    const txtPath = `${outputPrefix}.txt`;
     const text = await readFile(txtPath, 'utf-8');
     return text.trim() || null;
   } catch (err) {

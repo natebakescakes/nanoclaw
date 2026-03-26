@@ -75,6 +75,7 @@ export class GroupQueue {
       if (!this.waitingGroups.includes(groupJid)) {
         this.waitingGroups.push(groupJid);
       }
+      this.preemptIdleContainer();
       logger.debug(
         { groupJid, activeCount: this.activeCount },
         'At concurrency limit, message queued',
@@ -116,6 +117,7 @@ export class GroupQueue {
       if (!this.waitingGroups.includes(groupJid)) {
         this.waitingGroups.push(groupJid);
       }
+      this.preemptIdleContainer();
       logger.debug(
         { groupJid, taskId, activeCount: this.activeCount },
         'At concurrency limit, task queued',
@@ -350,6 +352,21 @@ export class GroupQueue {
         );
       }
       // If neither pending, skip this group
+    }
+  }
+
+  private preemptIdleContainer(): void {
+    for (const [groupJid, state] of this.groups) {
+      if (!state.active || !state.idleWaiting || state.isTaskContainer) {
+        continue;
+      }
+
+      logger.info(
+        { groupJid },
+        'Preempting idle container to free a slot for a waiting group',
+      );
+      this.closeStdin(groupJid);
+      return;
     }
   }
 

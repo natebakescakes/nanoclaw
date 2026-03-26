@@ -1,3 +1,4 @@
+import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -52,6 +53,40 @@ function expandHome(p: string, homeDir: string): string {
 function inferToolFromProfileId(profileId: string): string {
   const idx = profileId.indexOf(':');
   return idx === -1 ? profileId : profileId.slice(0, idx);
+}
+
+/**
+ * Finds the gws native binary by scanning NVM node versions.
+ * Falls back to common local install paths.
+ */
+function findGwsBinaryPath(homeDir: string): string {
+  // Scan NVM versions for the @googleworkspace/cli native binary
+  const nvmDir = path.join(homeDir, '.nvm', 'versions', 'node');
+  if (fs.existsSync(nvmDir)) {
+    for (const ver of fs.readdirSync(nvmDir)) {
+      const candidate = path.join(
+        nvmDir,
+        ver,
+        'lib',
+        'node_modules',
+        '@googleworkspace',
+        'cli',
+        'node_modules',
+        '.bin_real',
+        'gws',
+      );
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  // Check local bin
+  const localBin = path.join(homeDir, '.local', 'bin', 'gws');
+  if (fs.existsSync(localBin)) return localBin;
+  // Last resort: try which (may not work in service context)
+  try {
+    return execSync('which gws 2>/dev/null', { encoding: 'utf8' }).trim();
+  } catch {
+    return path.join(homeDir, '.local', 'bin', 'gws');
+  }
 }
 
 function sanitizeProfileSegment(value: string): string {
@@ -193,6 +228,34 @@ export function getBuiltinToolProfiles(
           containerPath: '/home/node/.config/mcp-googletasks-vrob',
           readonly: false,
           create: true,
+        },
+      ],
+    },
+    'atlassian:multiplier': {
+      tool: 'atlassian',
+      mounts: [
+        {
+          hostPath: path.join(homeDir, '.atlassian-mcp-work'),
+          containerPath: '/home/node',
+          readonly: false,
+          create: true,
+        },
+      ],
+    },
+    'gws:multiplier': {
+      tool: 'gws',
+      mounts: [
+        {
+          // Native binary mounted at a stable path the agent can invoke
+          hostPath: findGwsBinaryPath(homeDir),
+          containerPath: '/usr/local/bin/gws',
+          readonly: true,
+        },
+        {
+          // OAuth credentials + token cache (writable so tokens can refresh)
+          hostPath: path.join(homeDir, '.config', 'gws'),
+          containerPath: '/home/node/.config/gws',
+          readonly: false,
         },
       ],
     },

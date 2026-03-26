@@ -1,3 +1,8 @@
+---
+name: pdf-reader
+description: Extract text from local PDFs or fetch a PDF from a URL and extract its text. Use when the user needs a text-first view of a PDF.
+---
+
 # PDF Reader
 
 Extracts text from PDF files. Available as `pdf-reader` in any Bash command.

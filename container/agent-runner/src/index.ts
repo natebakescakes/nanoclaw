@@ -28,11 +28,19 @@ interface ToolPermissions {
   mcpServerProfiles?: string[];
 }
 
+interface ToolProfileMount {
+  hostPath: string;
+  containerPath: string;
+  readonly: boolean;
+  create?: boolean;
+}
+
 interface ResolvedToolProfile {
   profileId: string;
   tool: string;
   serverName: string;
   homeDir: string;
+  mounts: ToolProfileMount[];
 }
 
 interface ImageAttachment {
@@ -472,6 +480,10 @@ function buildProfileMcpServerConfig(profile: ResolvedToolProfile): {
         env: {
           HOME: profile.homeDir,
           ...buildNpxCacheEnv(profile),
+          // esbuild's postinstall downloads a native binary that fails in containers,
+          // causing npm to reject the whole install. The server is pre-compiled so
+          // esbuild is not needed at runtime — skip all postinstall scripts.
+          npm_config_ignore_scripts: 'true',
         },
       };
     case 'google-calendar':
@@ -546,6 +558,15 @@ function buildProfileMcpServerConfig(profile: ResolvedToolProfile): {
           ...buildNpxCacheEnv(profile),
         },
       };
+    case 'atlassian':
+      return {
+        command: 'npx',
+        args: ['-y', 'mcp-remote', 'https://mcp.atlassian.com/v1/mcp'],
+        env: {
+          HOME: profile.homeDir,
+          ...buildNpxCacheEnv(profile),
+        },
+      };
     case 'slack':
       return {
         command: 'node',
@@ -559,17 +580,165 @@ function buildProfileMcpServerConfig(profile: ResolvedToolProfile): {
   }
 }
 
+function buildDirectMcpServerConfig(tool: string): {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+} | null {
+  switch (tool) {
+    case 'ahrefs': {
+      const key = process.env.AHREFS_MCP_KEY ?? '';
+      if (!key) {
+        log('AHREFS_MCP_KEY is not set; Ahrefs MCP server will be skipped');
+        return null;
+      }
+
+      return {
+        command: 'npx',
+        args: [
+          '-y',
+          'mcp-remote',
+          'https://api.ahrefs.com/mcp/mcp',
+          '--transport',
+          'http-only',
+          '--header',
+          'Authorization:Bearer ${AHREFS_MCP_KEY}',
+        ],
+        env: {
+          AHREFS_MCP_KEY: key,
+          HOME: '/home/node',
+        },
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+function getSingleProfileToolAliases(
+  profiles: ResolvedToolProfile[],
+): Map<string, ResolvedToolProfile> {
+  const byTool = new Map<string, ResolvedToolProfile[]>();
+  for (const profile of profiles) {
+    const toolProfiles = byTool.get(profile.tool) ?? [];
+    toolProfiles.push(profile);
+    byTool.set(profile.tool, toolProfiles);
+  }
+
+  const aliases = new Map<string, ResolvedToolProfile>();
+  for (const [tool, toolProfiles] of byTool.entries()) {
+    if (toolProfiles.length === 1) {
+      aliases.set(tool, toolProfiles[0]);
+    }
+  }
+  return aliases;
+}
+
+function ensureLegacyToolHomes(profiles: ResolvedToolProfile[]): void {
+  const legacyDirs: Record<string, string> = {
+    littlelives: '/home/node/.littlelives',
+    ynab: '/home/node/.ynab',
+    trakt: '/home/node/.trakt',
+    ibkr: '/home/node/.ibkr',
+    slack: '/home/node/.slack',
+  };
+
+  for (const profile of profiles) {
+    const legacyDir = legacyDirs[profile.tool];
+    if (!legacyDir) continue;
+
+    const sourceDir = path.join(profile.homeDir, `.${profile.tool}`);
+    if (!fs.existsSync(sourceDir)) continue;
+
+    try {
+      if (fs.existsSync(legacyDir) || fs.lstatSync(legacyDir).isSymbolicLink()) {
+        fs.rmSync(legacyDir, { recursive: true, force: true });
+      }
+    } catch {
+      // Ignore missing paths and continue to recreate the legacy alias.
+    }
+
+    try {
+      fs.symlinkSync(sourceDir, legacyDir, 'dir');
+    } catch (err) {
+      log(
+        `Failed to create legacy home alias for ${profile.tool}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+}
+
+function ensureShellToolAliases(
+  profiles: ResolvedToolProfile[],
+): string | null {
+  const binDir = '/tmp/nanoclaw-profile-bin';
+  fs.mkdirSync(binDir, { recursive: true });
+
+  let created = false;
+  for (const profile of profiles) {
+    for (const mount of profile.mounts) {
+      if (!fs.existsSync(mount.containerPath)) continue;
+
+      let stats: fs.Stats;
+      try {
+        stats = fs.statSync(mount.containerPath);
+      } catch {
+        continue;
+      }
+
+      if (!stats.isFile()) continue;
+
+      const aliasName = path.basename(mount.hostPath);
+      if (!aliasName || aliasName.includes(path.sep)) continue;
+
+      const aliasPath = path.join(binDir, aliasName);
+      try {
+        if (fs.existsSync(aliasPath) || fs.lstatSync(aliasPath).isSymbolicLink()) {
+          fs.rmSync(aliasPath, { force: true });
+        }
+      } catch {
+        // Ignore stale/missing alias cleanup failures and retry the symlink.
+      }
+
+      try {
+        fs.symlinkSync(mount.containerPath, aliasPath);
+        created = true;
+      } catch (err) {
+        log(
+          `Failed to create shell alias for ${profile.tool} (${aliasName}): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+
+  return created ? binDir : null;
+}
+
 function buildToolAccessContext(containerInput: ContainerInput): string {
   const allowedProfiles = getAllowedToolProfiles(containerInput);
   const toolFamilies = [...new Set(allowedProfiles.map((p) => p.tool))].sort();
   const profileIds = allowedProfiles.map((p) => p.profileId).sort();
+  const callableToolPrefixes = new Set(
+    allowedProfiles.map((p) => `mcp__${p.serverName}__*`),
+  );
+  for (const [tool] of getSingleProfileToolAliases(allowedProfiles)) {
+    callableToolPrefixes.add(`mcp__${tool}__*`);
+  }
+  const callableToolPrefixList = [...callableToolPrefixes]
+    .sort();
 
   return [
     '<active_tool_access>',
     `main_group=${containerInput.isMain ? 'yes' : 'no'}`,
     `tool_families=${toolFamilies.length > 0 ? toolFamilies.join(', ') : 'none'}`,
     `profile_ids=${profileIds.length > 0 ? profileIds.join(', ') : 'none'}`,
-    'Use this exact block when the user asks which tools or profiles are active in this group.',
+    `callable_tool_prefixes=${callableToolPrefixList.length > 0 ? callableToolPrefixList.join(', ') : 'none'}`,
+    'When calling MCP tools, use callable_tool_prefixes exactly as written.',
+    'When the user asks which tools or profiles are active, report both profile_ids and callable_tool_prefixes.',
     '</active_tool_access>',
     '',
   ].join('\n');
@@ -647,15 +816,35 @@ async function runQuery(
   }
 
   const allowedToolProfiles = getAllowedToolProfiles(containerInput);
-  const allowedToolPatterns = allowedToolProfiles.map(
-    (profile) => `mcp__${profile.serverName}__*`,
-  );
+  ensureLegacyToolHomes(allowedToolProfiles);
+  const shellToolAliasDir = ensureShellToolAliases(allowedToolProfiles);
+  if (shellToolAliasDir) {
+    sdkEnv.PATH = `${shellToolAliasDir}:${sdkEnv.PATH || ''}`;
+  }
   const externalMcpServers = Object.fromEntries(
     allowedToolProfiles.flatMap((profile) => {
       const config = buildProfileMcpServerConfig(profile);
       return config ? [[profile.serverName, config]] : [];
     }),
   );
+  const allowedToolPatterns = new Set<string>(
+    allowedToolProfiles.map((profile) => `mcp__${profile.serverName}__*`),
+  );
+  for (const [tool, profile] of getSingleProfileToolAliases(
+    allowedToolProfiles,
+  )) {
+    const config = buildProfileMcpServerConfig(profile);
+    if (!config) continue;
+    allowedToolPatterns.add(`mcp__${tool}__*`);
+    externalMcpServers[tool] = config;
+  }
+  for (const tool of containerInput.toolPermissions?.mcpServers ?? []) {
+    if (externalMcpServers[tool]) continue;
+    const config = buildDirectMcpServerConfig(tool);
+    if (!config) continue;
+    allowedToolPatterns.add(`mcp__${tool}__*`);
+    externalMcpServers[tool] = config;
+  }
 
   for await (const message of query({
     prompt: stream,

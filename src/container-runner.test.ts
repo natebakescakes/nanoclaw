@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 import fs from 'fs';
@@ -45,6 +46,7 @@ vi.mock('fs', async () => {
       readFileSync: vi.fn(() => ''),
       readdirSync: vi.fn(() => []),
       statSync: vi.fn(() => ({ isDirectory: () => false })),
+      cpSync: vi.fn(),
       copyFileSync: vi.fn(),
     },
   };
@@ -53,6 +55,10 @@ vi.mock('fs', async () => {
 // Mock mount-security
 vi.mock('./mount-security.js', () => ({
   validateAdditionalMounts: vi.fn(() => []),
+}));
+
+vi.mock('./env.js', () => ({
+  readEnvFile: vi.fn(() => ({})),
 }));
 
 vi.mock('./tool-profiles.js', () => ({
@@ -152,6 +158,7 @@ import {
   runContainerAgent,
   ContainerOutput,
 } from './container-runner.js';
+import { readEnvFile } from './env.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -384,5 +391,73 @@ describe('container-runner tool profiles', () => {
             '/home/node/.nanoclaw/tool-profiles/gmail_work/.gmail-mcp',
       ),
     ).toBe(true);
+  });
+});
+
+describe('container-runner bundled skills', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fakeProc = createFakeProcess();
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p) => p === '/home/developer/nanoclaw/container/skills',
+    );
+    vi.mocked(fs.readdirSync).mockReturnValue(['status', 'capabilities'] as any);
+    vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => true } as any);
+  });
+
+  it('syncs bundled skills into both Claude and Codex homes', () => {
+    const mounts = buildVolumeMounts(testGroup, false);
+
+    expect(fs.cpSync).toHaveBeenCalledWith(
+      '/home/developer/nanoclaw/container/skills/status',
+      '/tmp/nanoclaw-test-data/sessions/test-group/.claude/skills/status',
+      { recursive: true },
+    );
+    expect(fs.cpSync).toHaveBeenCalledWith(
+      '/home/developer/nanoclaw/container/skills/status',
+      '/tmp/nanoclaw-test-data/sessions/test-group/.codex/skills/status',
+      { recursive: true },
+    );
+    expect(
+      mounts.some(
+        (m) =>
+          m.hostPath === '/tmp/nanoclaw-test-data/sessions/test-group/.claude' &&
+          m.containerPath === '/home/node/.claude',
+      ),
+    ).toBe(true);
+    expect(
+      mounts.some(
+        (m) =>
+          m.hostPath ===
+            '/tmp/nanoclaw-test-data/sessions/test-group/.codex/skills' &&
+          m.containerPath === '/home/node/.codex/skills',
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('container-runner MCP secrets', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fakeProc = createFakeProcess();
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    vi.mocked(readEnvFile).mockReturnValue({
+      AHREFS_MCP_KEY: 'test-ahrefs-key',
+    });
+  });
+
+  it('passes the Ahrefs MCP key into the container environment', async () => {
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+    });
+    fakeProc.emit('close', 0);
+    await resultPromise;
+
+    const spawnCalls = vi.mocked(spawn).mock.calls;
+    const containerArgs = spawnCalls[0]?.[1] as string[];
+    expect(containerArgs).toContain('-e');
+    expect(containerArgs).toContain('AHREFS_MCP_KEY=test-ahrefs-key');
   });
 });

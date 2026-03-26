@@ -4,6 +4,7 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -28,6 +29,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import {
   loadToolProfileRegistry,
@@ -78,7 +80,7 @@ export function buildVolumeMounts(
 
   if (isMain) {
     // Main gets the project root read-only. Writable paths the agent needs
-    // (group folder, IPC, .claude/) are mounted separately below.
+    // (group folder, IPC, agent state dirs) are mounted separately below.
     // Read-only prevents the agent from modifying host application code
     // (src/, dist/, package.json, etc.) which would bypass the sandbox
     // entirely on next restart.
@@ -135,15 +137,15 @@ export function buildVolumeMounts(
   });
 
   // Per-group Claude sessions directory (isolated from other groups)
-  // Each group gets their own .claude/ to prevent cross-group session access
-  const groupSessionsDir = path.join(
+  // Each group gets their own .claude/ to prevent cross-group session access.
+  const claudeSessionsDir = path.join(
     DATA_DIR,
     'sessions',
     group.folder,
     '.claude',
   );
-  fs.mkdirSync(groupSessionsDir, { recursive: true });
-  const settingsFile = path.join(groupSessionsDir, 'settings.json');
+  fs.mkdirSync(claudeSessionsDir, { recursive: true });
+  const settingsFile = path.join(claudeSessionsDir, 'settings.json');
   if (!fs.existsSync(settingsFile)) {
     fs.writeFileSync(
       settingsFile,
@@ -167,20 +169,61 @@ export function buildVolumeMounts(
     );
   }
 
-  // Sync skills from container/skills/ into each group's .claude/skills/
+  // Sync the bundled skills into both agent homes.
+  const codexSkillsDir = path.join(
+    DATA_DIR,
+    'sessions',
+    group.folder,
+    '.codex',
+    'skills',
+  );
+  fs.mkdirSync(codexSkillsDir, { recursive: true });
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
-  const skillsDst = path.join(groupSessionsDir, 'skills');
+  const skillDests = [
+    path.join(claudeSessionsDir, 'skills'),
+    codexSkillsDir,
+  ];
   if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
+    for (const skillsDst of skillDests) {
+      fs.mkdirSync(skillsDst, { recursive: true });
+      for (const skillDir of fs.readdirSync(skillsSrc)) {
+        const srcDir = path.join(skillsSrc, skillDir);
+        if (!fs.statSync(srcDir).isDirectory()) continue;
+        const dstDir = path.join(skillsDst, skillDir);
+        fs.cpSync(srcDir, dstDir, { recursive: true });
+      }
     }
   }
   mounts.push({
-    hostPath: groupSessionsDir,
+    hostPath: claudeSessionsDir,
     containerPath: '/home/node/.claude',
+    readonly: false,
+  });
+
+  if (group.containerConfig?.mountHostSsh) {
+    const sshDir = path.join(process.env.HOME || os.homedir(), '.ssh');
+    if (fs.existsSync(sshDir)) {
+      mounts.push({
+        hostPath: sshDir,
+        containerPath: '/home/node/.ssh',
+        readonly: true,
+      });
+    }
+  }
+
+  // Mount host Codex config so acpx/codex inside the container can authenticate.
+  // Mounted read-only — containers should not modify host auth state.
+  const codexDir = path.join(process.env.HOME || os.homedir(), '.codex');
+  if (fs.existsSync(codexDir)) {
+    mounts.push({
+      hostPath: codexDir,
+      containerPath: '/home/node/.codex',
+      readonly: true,
+    });
+  }
+  mounts.push({
+    hostPath: codexSkillsDir,
+    containerPath: '/home/node/.codex/skills',
     readonly: false,
   });
 
@@ -270,6 +313,7 @@ function buildContainerArgs(
   containerName: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+  const mcpSecrets = readEnvFile(['AHREFS_MCP_KEY']);
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
@@ -279,6 +323,15 @@ function buildContainerArgs(
     args.push('-e', `GOOGLE_TASKS_CLIENT_ID=${GOOGLE_TASKS_CLIENT_ID}`);
   if (GOOGLE_TASKS_CLIENT_SECRET)
     args.push('-e', `GOOGLE_TASKS_CLIENT_SECRET=${GOOGLE_TASKS_CLIENT_SECRET}`);
+
+  // Google Workspace CLI credentials path (used by gws tool profile)
+  args.push(
+    '-e',
+    'GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/home/node/.config/gws/credentials.json',
+  );
+  if (mcpSecrets.AHREFS_MCP_KEY) {
+    args.push('-e', `AHREFS_MCP_KEY=${mcpSecrets.AHREFS_MCP_KEY}`);
+  }
 
   // Route API traffic through the credential proxy (containers never see real secrets)
   args.push(

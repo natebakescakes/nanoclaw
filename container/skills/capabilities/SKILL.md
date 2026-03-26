@@ -1,9 +1,9 @@
 ---
 name: capabilities
-description: Show what this NanoClaw instance can do — installed skills, available tools, and system info. Read-only. Use when the user asks what the bot can do, what's installed, or runs /capabilities.
+description: Show what this NanoClaw instance can do — installed skills, available tools, and system info. Read-only. Use when the user asks what the bot can do, what's installed, or wants a capabilities report.
 ---
 
-# /capabilities — System Capabilities Report
+# Capabilities Report
 
 Generate a structured read-only report of what this NanoClaw instance can do.
 
@@ -24,26 +24,32 @@ Run these commands and compile the results into the report format below.
 
 ### 1. Installed skills
 
-List skill directories available to you:
+List skill directories available to you. Check the active agent home first, then the fallback path:
 
 ```bash
-ls -1 /home/node/.claude/skills/ 2>/dev/null || echo "No skills found"
+if [ -d /home/node/.codex/skills ]; then
+  ls -1 /home/node/.codex/skills/
+elif [ -d /home/node/.claude/skills ]; then
+  ls -1 /home/node/.claude/skills/
+else
+  echo "No skills found"
+fi
 ```
 
-Each directory is an installed skill. The directory name is the skill name (e.g., `agent-browser` → `/agent-browser`).
+Each directory is an installed skill. Refer to them by skill name, for example `agent-browser`.
 
 ### 2. Available tools
 
-Read the allowed tools from your SDK configuration. You always have access to:
+Summarize the tool families available in the current agent environment. In NanoClaw containers, you should expect access to:
 - **Core:** Bash, Read, Write, Edit, Glob, Grep
 - **Web:** WebSearch, WebFetch
 - **Orchestration:** Task, TaskOutput, TaskStop, TeamCreate, TeamDelete, SendMessage
 - **Other:** TodoWrite, ToolSearch, Skill, NotebookEdit
-- **MCP:** mcp__nanoclaw__* (messaging, tasks, group management)
+- **MCP or equivalent integration tools:** NanoClaw messaging, tasks, and group-management tools if configured
 
 ### 3. MCP server tools
 
-The NanoClaw MCP server exposes these tools (via `mcp__nanoclaw__*` prefix):
+The NanoClaw MCP server usually exposes tools for:
 - `send_message` — send a message to the user/group
 - `schedule_task` — schedule a recurring or one-time task
 - `list_tasks` — list scheduled tasks
@@ -76,8 +82,8 @@ Present the report as a clean, readable message. Example:
 📋 *NanoClaw Capabilities*
 
 *Installed Skills:*
-• /agent-browser — Browse the web, fill forms, extract data
-• /capabilities — This report
+• `agent-browser` — Browse the web, fill forms, extract data
+• `capabilities` — This report
 (list all found skills)
 
 *Tools:*
@@ -97,4 +103,4 @@ Present the report as a clean, readable message. Example:
 
 Adapt the output based on what you actually find — don't list things that aren't installed.
 
-**See also:** `/status` for a quick health check of session, workspace, and tasks.
+**See also:** `status` for a quick health check of session, workspace, and tasks.
