@@ -401,7 +401,10 @@ describe('container-runner bundled skills', () => {
     vi.mocked(fs.existsSync).mockImplementation(
       (p) => p === '/home/developer/nanoclaw/container/skills',
     );
-    vi.mocked(fs.readdirSync).mockReturnValue(['status', 'capabilities'] as any);
+    vi.mocked(fs.readdirSync).mockReturnValue([
+      'status',
+      'capabilities',
+    ] as any);
     vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => true } as any);
   });
 
@@ -421,7 +424,8 @@ describe('container-runner bundled skills', () => {
     expect(
       mounts.some(
         (m) =>
-          m.hostPath === '/tmp/nanoclaw-test-data/sessions/test-group/.claude' &&
+          m.hostPath ===
+            '/tmp/nanoclaw-test-data/sessions/test-group/.claude' &&
           m.containerPath === '/home/node/.claude',
       ),
     ).toBe(true);

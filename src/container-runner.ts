@@ -179,10 +179,7 @@ export function buildVolumeMounts(
   );
   fs.mkdirSync(codexSkillsDir, { recursive: true });
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
-  const skillDests = [
-    path.join(claudeSessionsDir, 'skills'),
-    codexSkillsDir,
-  ];
+  const skillDests = [path.join(claudeSessionsDir, 'skills'), codexSkillsDir];
   if (fs.existsSync(skillsSrc)) {
     for (const skillsDst of skillDests) {
       fs.mkdirSync(skillsDst, { recursive: true });

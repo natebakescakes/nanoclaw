@@ -97,7 +97,10 @@ async function resolveWhisperModelPath(model: string): Promise<string> {
   );
 }
 
-async function normalizeAudio(inputPath: string, outputPath: string): Promise<void> {
+async function normalizeAudio(
+  inputPath: string,
+  outputPath: string,
+): Promise<void> {
   const ffmpegBin = getConfigValue('FFMPEG_BIN') || 'ffmpeg';
   await execFileAsync(
     ffmpegBin,
@@ -189,11 +192,7 @@ export async function transcribeAudio(
       args.push('-t', whisperThreads);
     }
 
-    await execFileAsync(
-      whisperBin,
-      args,
-      { timeout: WHISPER_TIMEOUT },
-    );
+    await execFileAsync(whisperBin, args, { timeout: WHISPER_TIMEOUT });
 
     const txtPath = `${outputPrefix}.txt`;
     const text = await readFile(txtPath, 'utf-8');
