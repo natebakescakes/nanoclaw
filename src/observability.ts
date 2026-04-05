@@ -135,7 +135,8 @@ export class ObservabilityManager {
     this.instanceId = options.instanceId ?? OBSERVABILITY_INSTANCE_ID;
     this.flushIntervalMs =
       options.flushIntervalMs ?? OBSERVABILITY_FLUSH_INTERVAL_MS;
-    this.maxBatchEvents = options.maxBatchEvents ?? OBSERVABILITY_MAX_BATCH_EVENTS;
+    this.maxBatchEvents =
+      options.maxBatchEvents ?? OBSERVABILITY_MAX_BATCH_EVENTS;
     this.syncUrl = options.syncUrl ?? OBSERVABILITY_SYNC_URL;
     this.apiToken = options.apiToken ?? OBSERVABILITY_API_TOKEN;
     this.archiveDir = path.join(this.directory, 'archive');
@@ -281,7 +282,10 @@ export class ObservabilityManager {
   }
 }
 
-export function redactText(value: string, maxPreviewLength = 120): RedactedText {
+export function redactText(
+  value: string,
+  maxPreviewLength = 120,
+): RedactedText {
   return {
     preview:
       value.length <= maxPreviewLength

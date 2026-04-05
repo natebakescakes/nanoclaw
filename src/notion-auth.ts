@@ -43,7 +43,10 @@ function getNotionAuthRoots(profile: ResolvedToolProfile): string[] {
   );
   if (!authMount) return [];
 
-  const roots = [authMount.hostPath, path.join(authMount.hostPath, '.mcp-auth')];
+  const roots = [
+    authMount.hostPath,
+    path.join(authMount.hostPath, '.mcp-auth'),
+  ];
   return roots.filter((root, index) => roots.indexOf(root) === index);
 }
 
@@ -147,7 +150,9 @@ async function refreshNotionBundle(
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`Notion token refresh failed (${response.status}): ${body}`);
+    throw new Error(
+      `Notion token refresh failed (${response.status}): ${body}`,
+    );
   }
 
   const refreshed = (await response.json()) as NotionTokenPayload;

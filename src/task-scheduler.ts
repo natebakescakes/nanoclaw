@@ -19,7 +19,11 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
-import { createRunId, emitObservabilityEvent, redactText } from './observability.js';
+import {
+  createRunId,
+  emitObservabilityEvent,
+  redactText,
+} from './observability.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**

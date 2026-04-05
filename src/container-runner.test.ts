@@ -1,11 +1,4 @@
-import {
-  describe,
-  it,
-  expect,
-  beforeEach,
-  vi,
-  afterEach,
-} from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';

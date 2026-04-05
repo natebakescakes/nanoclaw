@@ -598,10 +598,7 @@ async function runAgent(
       const previousSessionId = sessions[group.folder];
       sessions[group.folder] = output.newSessionId;
       setSession(group.folder, output.newSessionId);
-      if (
-        previousSessionId !== output.newSessionId &&
-        !sessionEventEmitted
-      ) {
+      if (previousSessionId !== output.newSessionId && !sessionEventEmitted) {
         sessionEventEmitted = true;
         emitObservabilityEvent({
           eventType: 'session.created',

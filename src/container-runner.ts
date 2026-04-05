@@ -37,7 +37,11 @@ import {
   ResolvedToolProfile,
 } from './tool-profiles.js';
 import { emitObservabilityEvent } from './observability.js';
-import { RegisteredGroup, ToolPermissions, ToolRuntimeStatus } from './types.js';
+import {
+  RegisteredGroup,
+  ToolPermissions,
+  ToolRuntimeStatus,
+} from './types.js';
 import { refreshOauthProfileTokens } from './notion-auth.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL });
@@ -871,7 +875,10 @@ export async function runContainerAgent(
           'Container completed',
         );
         emitObservabilityEvent({
-          eventType: output.status === 'success' ? 'container.completed' : 'container.failed',
+          eventType:
+            output.status === 'success'
+              ? 'container.completed'
+              : 'container.failed',
           severity: output.status === 'success' ? 'info' : 'error',
           runId: input.runId,
           groupFolder: input.groupFolder,
