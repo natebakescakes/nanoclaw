@@ -8,6 +8,7 @@ import os from 'os';
 import path from 'path';
 
 import {
+  CREDENTIAL_PROXY_PORT,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -35,7 +36,9 @@ import {
   resolveToolProfiles,
   ResolvedToolProfile,
 } from './tool-profiles.js';
-import { RegisteredGroup, ToolPermissions } from './types.js';
+import { emitObservabilityEvent } from './observability.js';
+import { RegisteredGroup, ToolPermissions, ToolRuntimeStatus } from './types.js';
+import { refreshOauthProfileTokens } from './notion-auth.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
@@ -44,6 +47,7 @@ const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 export interface ContainerInput {
+  runId?: string;
   prompt: string;
   sessionId?: string;
   groupFolder: string;
@@ -63,12 +67,34 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  toolRuntimeStatuses?: ToolRuntimeStatus[];
 }
 
 interface VolumeMount {
   hostPath: string;
   containerPath: string;
   readonly: boolean;
+}
+
+function addProjectRootAliasMounts(
+  mounts: VolumeMount[],
+  projectRoot: string,
+): void {
+  mounts.push({
+    hostPath: projectRoot,
+    containerPath: '/workspace/project',
+    readonly: true,
+  });
+
+  // Shadow .env so non-main groups with a repo alias still cannot read secrets.
+  const envFile = path.join(projectRoot, '.env');
+  if (fs.existsSync(envFile)) {
+    mounts.push({
+      hostPath: '/dev/null',
+      containerPath: '/workspace/project/.env',
+      readonly: true,
+    });
+  }
 }
 
 export function buildVolumeMounts(
@@ -86,22 +112,7 @@ export function buildVolumeMounts(
     // Read-only prevents the agent from modifying host application code
     // (src/, dist/, package.json, etc.) which would bypass the sandbox
     // entirely on next restart.
-    mounts.push({
-      hostPath: projectRoot,
-      containerPath: '/workspace/project',
-      readonly: true,
-    });
-
-    // Shadow .env so the agent cannot read secrets from the mounted project root.
-    // Credentials are injected by the OneCLI gateway, never exposed to containers.
-    const envFile = path.join(projectRoot, '.env');
-    if (fs.existsSync(envFile)) {
-      mounts.push({
-        hostPath: '/dev/null',
-        containerPath: '/workspace/project/.env',
-        readonly: true,
-      });
-    }
+    addProjectRootAliasMounts(mounts, projectRoot);
 
     // Main also gets its group folder as the working directory
     mounts.push({
@@ -302,6 +313,20 @@ export function buildVolumeMounts(
       isMain,
     );
     mounts.push(...validatedMounts);
+
+    // If a non-main group explicitly mounts the current NanoClaw repo,
+    // expose the same readonly tree at /workspace/project as a compatibility
+    // alias for tools like acpx/codex that assume a canonical repo root.
+    if (
+      !isMain &&
+      validatedMounts.some(
+        (mount) =>
+          path.resolve(mount.hostPath) === path.resolve(projectRoot) &&
+          mount.readonly,
+      )
+    ) {
+      addProjectRootAliasMounts(mounts, projectRoot);
+    }
   }
 
   return mounts;
@@ -313,7 +338,12 @@ async function buildContainerArgs(
   agentIdentifier?: string,
 ): Promise<string[]> {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
-  const mcpSecrets = readEnvFile(['AHREFS_MCP_KEY']);
+  const mcpSecrets = readEnvFile([
+    'AHREFS_MCP_KEY',
+    'ANTHROPIC_API_KEY',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_AUTH_TOKEN',
+  ]);
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
@@ -345,6 +375,20 @@ async function buildContainerArgs(
       { containerName },
       'OneCLI gateway not reachable — container will have no credentials',
     );
+
+    // Fallback to the built-in local credential proxy when OneCLI is unavailable.
+    args.push(
+      '-e',
+      `ANTHROPIC_BASE_URL=http://host.docker.internal:${CREDENTIAL_PROXY_PORT}`,
+    );
+    if (mcpSecrets.ANTHROPIC_API_KEY) {
+      args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+    } else if (
+      mcpSecrets.CLAUDE_CODE_OAUTH_TOKEN ||
+      mcpSecrets.ANTHROPIC_AUTH_TOKEN
+    ) {
+      args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    }
   }
 
   // Runtime-specific args for host gateway resolution
@@ -380,6 +424,8 @@ export async function runContainerAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
+  const effectiveToolPermissions =
+    input.toolPermissions ?? group.containerConfig?.toolPermissions;
 
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
@@ -387,14 +433,15 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(
     group,
     input.isMain,
-    group.containerConfig?.toolPermissions,
+    effectiveToolPermissions,
   );
   const registry = loadToolProfileRegistry();
   const resolvedToolProfiles = resolveToolProfiles(
     input.isMain,
-    group.containerConfig?.toolPermissions,
+    effectiveToolPermissions,
     registry,
   );
+  await refreshOauthProfileTokens(resolvedToolProfiles);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   // Main group uses the default OneCLI agent; others use their own agent.
@@ -429,6 +476,20 @@ export async function runContainerAgent(
     },
     'Spawning container agent',
   );
+  emitObservabilityEvent({
+    eventType: 'container.started',
+    runId: input.runId,
+    groupFolder: input.groupFolder,
+    chatJid: input.chatJid,
+    sessionIdBefore: input.sessionId,
+    containerName,
+    payload: {
+      isMain: input.isMain,
+      isScheduledTask: input.isScheduledTask === true,
+      mountCount: mounts.length,
+      toolProfileIds: resolvedToolProfiles.map((profile) => profile.profileId),
+    },
+  });
 
   const logsDir = path.join(groupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
@@ -456,6 +517,7 @@ export async function runContainerAgent(
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
     let parseBuffer = '';
     let newSessionId: string | undefined;
+    let toolRuntimeStatuses: ToolRuntimeStatus[] | undefined;
     let outputChain = Promise.resolve();
 
     container.stdout.on('data', (data) => {
@@ -493,6 +555,9 @@ export async function runContainerAgent(
             const parsed: ContainerOutput = JSON.parse(jsonStr);
             if (parsed.newSessionId) {
               newSessionId = parsed.newSessionId;
+            }
+            if (parsed.toolRuntimeStatuses?.length) {
+              toolRuntimeStatuses = parsed.toolRuntimeStatuses;
             }
             hadStreamingOutput = true;
             // Activity detected — reset the hard timeout
@@ -592,11 +657,25 @@ export async function runContainerAgent(
             { group: group.name, containerName, duration, code },
             'Container timed out after output (idle cleanup)',
           );
+          emitObservabilityEvent({
+            eventType: 'container.timeout',
+            severity: 'warn',
+            runId: input.runId,
+            groupFolder: input.groupFolder,
+            chatJid: input.chatJid,
+            containerName,
+            payload: {
+              durationMs: duration,
+              exitCode: code,
+              hadStreamingOutput,
+            },
+          });
           outputChain.then(() => {
             resolve({
               status: 'success',
               result: null,
               newSessionId,
+              toolRuntimeStatuses,
             });
           });
           return;
@@ -606,11 +685,25 @@ export async function runContainerAgent(
           { group: group.name, containerName, duration, code },
           'Container timed out with no output',
         );
+        emitObservabilityEvent({
+          eventType: 'container.timeout',
+          severity: 'error',
+          runId: input.runId,
+          groupFolder: input.groupFolder,
+          chatJid: input.chatJid,
+          containerName,
+          payload: {
+            durationMs: duration,
+            exitCode: code,
+            hadStreamingOutput,
+          },
+        });
 
         resolve({
           status: 'error',
           result: null,
           error: `Container timed out after ${configTimeout}ms`,
+          toolRuntimeStatuses,
         });
         return;
       }
@@ -695,11 +788,26 @@ export async function runContainerAgent(
           },
           'Container exited with error',
         );
+        emitObservabilityEvent({
+          eventType: 'container.failed',
+          severity: 'error',
+          runId: input.runId,
+          groupFolder: input.groupFolder,
+          chatJid: input.chatJid,
+          containerName,
+          payload: {
+            durationMs: duration,
+            exitCode: code,
+            logFile,
+            errorPreview: stderr.slice(-200),
+          },
+        });
 
         resolve({
           status: 'error',
           result: null,
           error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
+          toolRuntimeStatuses,
         });
         return;
       }
@@ -711,10 +819,24 @@ export async function runContainerAgent(
             { group: group.name, duration, newSessionId },
             'Container completed (streaming mode)',
           );
+          emitObservabilityEvent({
+            eventType: 'container.completed',
+            runId: input.runId,
+            groupFolder: input.groupFolder,
+            chatJid: input.chatJid,
+            sessionIdBefore: input.sessionId,
+            sessionIdAfter: newSessionId,
+            containerName,
+            payload: {
+              durationMs: duration,
+              streaming: true,
+            },
+          });
           resolve({
             status: 'success',
             result: null,
             newSessionId,
+            toolRuntimeStatuses,
           });
         });
         return;
@@ -748,6 +870,23 @@ export async function runContainerAgent(
           },
           'Container completed',
         );
+        emitObservabilityEvent({
+          eventType: output.status === 'success' ? 'container.completed' : 'container.failed',
+          severity: output.status === 'success' ? 'info' : 'error',
+          runId: input.runId,
+          groupFolder: input.groupFolder,
+          chatJid: input.chatJid,
+          sessionIdBefore: input.sessionId,
+          sessionIdAfter: output.newSessionId,
+          containerName,
+          payload: {
+            durationMs: duration,
+            streaming: false,
+            hasResult: !!output.result,
+            outputStatus: output.status,
+            error: output.error,
+          },
+        });
 
         resolve(output);
       } catch (err) {
@@ -760,11 +899,25 @@ export async function runContainerAgent(
           },
           'Failed to parse container output',
         );
+        emitObservabilityEvent({
+          eventType: 'container.failed',
+          severity: 'error',
+          runId: input.runId,
+          groupFolder: input.groupFolder,
+          chatJid: input.chatJid,
+          sessionIdBefore: input.sessionId,
+          containerName,
+          payload: {
+            durationMs: duration,
+            parseError: err instanceof Error ? err.message : String(err),
+          },
+        });
 
         resolve({
           status: 'error',
           result: null,
           error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
+          toolRuntimeStatuses,
         });
       }
     });
@@ -775,10 +928,23 @@ export async function runContainerAgent(
         { group: group.name, containerName, error: err },
         'Container spawn error',
       );
+      emitObservabilityEvent({
+        eventType: 'container.failed',
+        severity: 'error',
+        runId: input.runId,
+        groupFolder: input.groupFolder,
+        chatJid: input.chatJid,
+        sessionIdBefore: input.sessionId,
+        containerName,
+        payload: {
+          spawnError: err.message,
+        },
+      });
       resolve({
         status: 'error',
         result: null,
         error: `Container spawn error: ${err.message}`,
+        toolRuntimeStatuses: [],
       });
     });
   });

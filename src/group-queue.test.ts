@@ -6,6 +6,13 @@ import { GroupQueue } from './group-queue.js';
 vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-test-data',
   MAX_CONCURRENT_CONTAINERS: 2,
+  OBSERVABILITY_API_TOKEN: '',
+  OBSERVABILITY_DIR: '/tmp/nanoclaw-test-data/observability',
+  OBSERVABILITY_ENABLED: false,
+  OBSERVABILITY_FLUSH_INTERVAL_MS: 1000,
+  OBSERVABILITY_INSTANCE_ID: 'test-instance',
+  OBSERVABILITY_MAX_BATCH_EVENTS: 100,
+  OBSERVABILITY_SYNC_URL: '',
 }));
 
 // Mock fs operations used by sendMessage/closeStdin

@@ -2,13 +2,16 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
+  clearSession,
   createTask,
   deleteTask,
   getAllChats,
+  getAllSessions,
   getAllRegisteredGroups,
   getMessagesSince,
   getNewMessages,
   getTaskById,
+  setSession,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
@@ -137,6 +140,17 @@ describe('storeMessage', () => {
     );
     expect(messages).toHaveLength(1);
     expect(messages[0].content).toBe('updated');
+  });
+});
+
+describe('session accessors', () => {
+  it('clears a persisted session', () => {
+    setSession('telegram_work', 'session-123');
+    expect(getAllSessions()).toEqual({ telegram_work: 'session-123' });
+
+    clearSession('telegram_work');
+
+    expect(getAllSessions()).toEqual({});
   });
 });
 

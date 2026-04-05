@@ -97,6 +97,15 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+export interface ToolRuntimeStatus {
+  profileId: string;
+  tool: string;
+  transport: 'mcp' | 'shell' | 'unknown';
+  auth: 'working' | 'missing' | 'auth_failed' | 'unknown';
+  source: 'live_probe' | 'filesystem';
+  detail: string;
+}
+
 // --- Channel abstraction ---
 
 export interface Channel {

@@ -19,6 +19,8 @@ import path from 'path';
 import { execFile } from 'child_process';
 import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { resolveMcpRemoteCommand } from './mcp-remote.js';
+import { classifyNotionProbeResult } from './notion-probe.js';
 
 interface ToolPermissions {
   mcpServers?: string[];
@@ -80,6 +82,16 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  toolRuntimeStatuses?: ToolRuntimeStatus[];
+}
+
+interface ToolRuntimeStatus {
+  profileId: string;
+  tool: string;
+  transport: 'mcp' | 'shell' | 'unknown';
+  auth: 'working' | 'missing' | 'auth_failed' | 'unknown';
+  source: 'live_probe' | 'filesystem';
+  detail: string;
 }
 
 interface SessionEntry {
@@ -455,6 +467,16 @@ function getAllowedToolProfiles(
   );
 }
 
+function getProfileMountPath(
+  profile: ResolvedToolProfile,
+  basename: string,
+): string | null {
+  const mount = profile.mounts.find(
+    (candidate) => path.basename(candidate.hostPath) === basename,
+  );
+  return mount?.containerPath ?? null;
+}
+
 function buildNpxCacheEnv(
   profile: ResolvedToolProfile,
 ): Record<string, string> {
@@ -549,8 +571,7 @@ function buildProfileMcpServerConfig(profile: ResolvedToolProfile): {
       };
     case 'notion':
       return {
-        command: 'npx',
-        args: ['-y', 'mcp-remote', 'https://mcp.notion.com/mcp'],
+        ...resolveMcpRemoteCommand('mcp-remote', 'https://mcp.notion.com/mcp'),
         env: {
           HOME: profile.homeDir,
           ...buildNpxCacheEnv(profile),
@@ -558,8 +579,10 @@ function buildProfileMcpServerConfig(profile: ResolvedToolProfile): {
       };
     case 'atlassian':
       return {
-        command: 'npx',
-        args: ['-y', 'mcp-remote', 'https://mcp.atlassian.com/v1/mcp'],
+        ...resolveMcpRemoteCommand(
+          'mcp-remote',
+          'https://mcp.atlassian.com/v1/mcp',
+        ),
         env: {
           HOME: profile.homeDir,
           ...buildNpxCacheEnv(profile),
@@ -590,13 +613,15 @@ function buildDirectMcpServerConfig(tool: string): {
         log('AHREFS_MCP_KEY is not set; Ahrefs MCP server will be skipped');
         return null;
       }
+      const command = resolveMcpRemoteCommand(
+        'mcp-remote',
+        'https://api.ahrefs.com/mcp/mcp',
+      );
 
       return {
-        command: 'npx',
+        ...command,
         args: [
-          '-y',
-          'mcp-remote',
-          'https://api.ahrefs.com/mcp/mcp',
+          ...command.args,
           '--transport',
           'http-only',
           '--header',
@@ -610,6 +635,185 @@ function buildDirectMcpServerConfig(tool: string): {
     }
     default:
       return null;
+  }
+}
+
+function execFileResult(
+  command: string,
+  args: string[],
+  options: {
+    env?: NodeJS.ProcessEnv;
+    timeout?: number;
+    cwd?: string;
+  } = {},
+): Promise<{ ok: boolean; output: string; error?: string }> {
+  return new Promise((resolve) => {
+    execFile(
+      command,
+      args,
+      {
+        env: options.env,
+        timeout: options.timeout,
+        cwd: options.cwd,
+        maxBuffer: 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        const output = `${stdout || ''}\n${stderr || ''}`.trim();
+        if (!error) {
+          resolve({ ok: true, output });
+          return;
+        }
+
+        resolve({
+          ok: false,
+          output,
+          error: error.message,
+        });
+      },
+    );
+  });
+}
+
+async function probeNotionProfile(
+  profile: ResolvedToolProfile,
+  sdkEnv: Record<string, string | undefined>,
+): Promise<ToolRuntimeStatus> {
+  const authDir = path.join(profile.homeDir, '.mcp-auth');
+  if (!fs.existsSync(authDir)) {
+    return {
+      profileId: profile.profileId,
+      tool: profile.tool,
+      transport: 'mcp',
+      auth: 'missing',
+      source: 'filesystem',
+      detail: `Missing auth directory at ${authDir}`,
+    };
+  }
+  const command = resolveMcpRemoteCommand(
+    'mcp-remote-client',
+    'https://mcp.notion.com/mcp',
+  );
+
+  const result = await execFileResult(
+    command.command,
+    command.args,
+    {
+      env: {
+        ...process.env,
+        ...sdkEnv,
+        HOME: profile.homeDir,
+        ...buildNpxCacheEnv(profile),
+      },
+      timeout: 20000,
+    },
+  );
+  const classified = classifyNotionProbeResult(result);
+
+  return {
+    profileId: profile.profileId,
+    tool: profile.tool,
+    transport: 'mcp',
+    auth: classified.auth,
+    source: 'live_probe',
+    detail: classified.detail,
+  };
+}
+
+async function probeGwsProfile(
+  profile: ResolvedToolProfile,
+  sdkEnv: Record<string, string | undefined>,
+): Promise<ToolRuntimeStatus> {
+  const configDir = path.join(profile.homeDir, '.config', 'gws');
+  const credentialsPath = path.join(configDir, 'credentials.json');
+  if (!fs.existsSync(credentialsPath)) {
+    return {
+      profileId: profile.profileId,
+      tool: profile.tool,
+      transport: 'shell',
+      auth: 'missing',
+      source: 'filesystem',
+      detail: `Missing credentials file at ${credentialsPath}`,
+    };
+  }
+
+  const gwsPath = getProfileMountPath(profile, 'gws') || 'gws';
+  const result = await execFileResult(
+    gwsPath,
+    [
+      'calendar',
+      'calendarList',
+      'list',
+      '--params',
+      '{"maxResults":1}',
+      '--format',
+      'json',
+    ],
+    {
+      env: {
+        ...process.env,
+        ...sdkEnv,
+        HOME: profile.homeDir,
+        GOOGLE_WORKSPACE_CLI_CONFIG_DIR: configDir,
+        GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE: credentialsPath,
+      },
+      timeout: 15000,
+    },
+  );
+
+  if (result.ok) {
+    return {
+      profileId: profile.profileId,
+      tool: profile.tool,
+      transport: 'shell',
+      auth: 'working',
+      source: 'live_probe',
+      detail: 'GWS calendar probe succeeded in this container run',
+    };
+  }
+
+  const haystack = `${result.output}\n${result.error || ''}`.toLowerCase();
+  const authFailed =
+    haystack.includes('auth') ||
+    haystack.includes('oauth') ||
+    haystack.includes('credential') ||
+    haystack.includes('token') ||
+    haystack.includes('unauthorized') ||
+    haystack.includes('forbidden');
+
+  return {
+    profileId: profile.profileId,
+    tool: profile.tool,
+    transport: 'shell',
+    auth: authFailed ? 'auth_failed' : 'unknown',
+    source: 'live_probe',
+    detail: result.error || result.output || 'GWS probe failed',
+  };
+}
+
+async function getToolRuntimeStatus(
+  profile: ResolvedToolProfile,
+  sdkEnv: Record<string, string | undefined>,
+): Promise<ToolRuntimeStatus> {
+  switch (profile.tool) {
+    case 'notion':
+      return probeNotionProfile(profile, sdkEnv);
+    case 'gws':
+      return probeGwsProfile(profile, sdkEnv);
+    default: {
+      const hasAnyMount = profile.mounts.some((mount) =>
+        fs.existsSync(mount.containerPath),
+      );
+      return {
+        profileId: profile.profileId,
+        tool: profile.tool,
+        transport: buildProfileMcpServerConfig(profile) ? 'mcp' : 'unknown',
+        auth: hasAnyMount ? 'unknown' : 'missing',
+        source: 'filesystem',
+        detail: hasAnyMount
+          ? 'Profile mounts are present; no live auth probe implemented'
+          : 'Expected profile mounts are missing',
+      };
+    }
   }
 }
 
@@ -633,31 +837,61 @@ function getSingleProfileToolAliases(
 }
 
 function ensureLegacyToolHomes(profiles: ResolvedToolProfile[]): void {
-  const legacyDirs: Record<string, string> = {
-    littlelives: '/home/node/.littlelives',
-    ynab: '/home/node/.ynab',
-    trakt: '/home/node/.trakt',
-    ibkr: '/home/node/.ibkr',
-    slack: '/home/node/.slack',
+  const legacyDirs: Record<
+    string,
+    { source: (profile: ResolvedToolProfile) => string; target: string }
+  > = {
+    littlelives: {
+      source: (profile) => path.join(profile.homeDir, '.littlelives'),
+      target: '/home/node/.littlelives',
+    },
+    ynab: {
+      source: (profile) => path.join(profile.homeDir, '.ynab'),
+      target: '/home/node/.ynab',
+    },
+    trakt: {
+      source: (profile) => path.join(profile.homeDir, '.trakt'),
+      target: '/home/node/.trakt',
+    },
+    ibkr: {
+      source: (profile) => path.join(profile.homeDir, '.ibkr'),
+      target: '/home/node/.ibkr',
+    },
+    slack: {
+      source: (profile) => path.join(profile.homeDir, '.slack'),
+      target: '/home/node/.slack',
+    },
+    notion: {
+      source: (profile) => path.join(profile.homeDir, '.mcp-auth'),
+      target: '/home/node/.mcp-auth',
+    },
+    gws: {
+      source: (profile) => path.join(profile.homeDir, '.config', 'gws'),
+      target: '/home/node/.config/gws',
+    },
   };
 
   for (const profile of profiles) {
     const legacyDir = legacyDirs[profile.tool];
     if (!legacyDir) continue;
 
-    const sourceDir = path.join(profile.homeDir, `.${profile.tool}`);
+    const sourceDir = legacyDir.source(profile);
     if (!fs.existsSync(sourceDir)) continue;
+    fs.mkdirSync(path.dirname(legacyDir.target), { recursive: true });
 
     try {
-      if (fs.existsSync(legacyDir) || fs.lstatSync(legacyDir).isSymbolicLink()) {
-        fs.rmSync(legacyDir, { recursive: true, force: true });
+      if (
+        fs.existsSync(legacyDir.target) ||
+        fs.lstatSync(legacyDir.target).isSymbolicLink()
+      ) {
+        fs.rmSync(legacyDir.target, { recursive: true, force: true });
       }
     } catch {
       // Ignore missing paths and continue to recreate the legacy alias.
     }
 
     try {
-      fs.symlinkSync(sourceDir, legacyDir, 'dir');
+      fs.symlinkSync(sourceDir, legacyDir.target, 'dir');
     } catch (err) {
       log(
         `Failed to create legacy home alias for ${profile.tool}: ${
@@ -716,30 +950,83 @@ function ensureShellToolAliases(
   return created ? binDir : null;
 }
 
-function buildToolAccessContext(containerInput: ContainerInput): string {
+function getShellToolAliases(profiles: ResolvedToolProfile[]): string[] {
+  const aliases = new Set<string>();
+
+  for (const profile of profiles) {
+    for (const mount of profile.mounts) {
+      if (!fs.existsSync(mount.containerPath)) continue;
+
+      let stats: fs.Stats;
+      try {
+        stats = fs.statSync(mount.containerPath);
+      } catch {
+        continue;
+      }
+
+      if (!stats.isFile()) continue;
+
+      const aliasName = path.basename(mount.hostPath);
+      if (!aliasName || aliasName.includes(path.sep)) continue;
+      aliases.add(aliasName);
+    }
+  }
+
+  return [...aliases].sort();
+}
+
+async function buildToolAccessContext(
+  containerInput: ContainerInput,
+  sdkEnv: Record<string, string | undefined>,
+): Promise<{ promptPrefix: string; runtimeStatuses: ToolRuntimeStatus[] }> {
   const allowedProfiles = getAllowedToolProfiles(containerInput);
   const toolFamilies = [...new Set(allowedProfiles.map((p) => p.tool))].sort();
   const profileIds = allowedProfiles.map((p) => p.profileId).sort();
-  const callableToolPrefixes = new Set(
-    allowedProfiles.map((p) => `mcp__${p.serverName}__*`),
-  );
-  for (const [tool] of getSingleProfileToolAliases(allowedProfiles)) {
+  const callableToolPrefixes = new Set<string>();
+  for (const profile of allowedProfiles) {
+    if (!buildProfileMcpServerConfig(profile)) continue;
+    callableToolPrefixes.add(`mcp__${profile.serverName}__*`);
+  }
+  for (const [tool, profile] of getSingleProfileToolAliases(allowedProfiles)) {
+    if (!buildProfileMcpServerConfig(profile)) continue;
     callableToolPrefixes.add(`mcp__${tool}__*`);
   }
-  const callableToolPrefixList = [...callableToolPrefixes]
+  const callableToolPrefixList = [...callableToolPrefixes].sort();
+  const shellToolAliases = getShellToolAliases(allowedProfiles);
+  const runtimeStatuses = await Promise.all(
+    allowedProfiles.map((profile) => getToolRuntimeStatus(profile, sdkEnv)),
+  );
+  const runtimeStatusLines = runtimeStatuses
+    .map(
+      (status) =>
+        `${status.profileId} tool=${status.tool} transport=${status.transport} auth=${status.auth} source=${status.source} detail="${status.detail.replace(/\s+/g, ' ').trim().slice(0, 160)}"`,
+    )
     .sort();
 
-  return [
+  return {
+    promptPrefix: [
     '<active_tool_access>',
     `main_group=${containerInput.isMain ? 'yes' : 'no'}`,
     `tool_families=${toolFamilies.length > 0 ? toolFamilies.join(', ') : 'none'}`,
     `profile_ids=${profileIds.length > 0 ? profileIds.join(', ') : 'none'}`,
     `callable_tool_prefixes=${callableToolPrefixList.length > 0 ? callableToolPrefixList.join(', ') : 'none'}`,
-    'When calling MCP tools, use callable_tool_prefixes exactly as written.',
-    'When the user asks which tools or profiles are active, report both profile_ids and callable_tool_prefixes.',
+    `shell_tool_aliases=${shellToolAliases.length > 0 ? shellToolAliases.join(', ') : 'none'}`,
+    `runtime_tool_status=${runtimeStatusLines.length > 0 ? 'present' : 'none'}`,
+    'Use callable_tool_prefixes only as server-name prefixes; they are not exact tool names.',
+    'Do not invent specific MCP method names such as search/create/update from a prefix alone.',
+    'If a guessed MCP tool returns "no such tool", treat that as evidence the exact tool name is wrong before claiming the server is missing or not mounted.',
+    'Use shell_tool_aliases via Bash as normal commands already on PATH inside the container.',
+    'Treat runtime_tool_status as the source of truth for this container run, even if earlier messages claimed a tool was broken.',
+    'If a tool shows auth=working, do not claim its auth is expired without a new contradictory live check.',
+    'If a tool shows auth=unknown and you need it, perform a live check before claiming an auth problem.',
+    'When the user asks which tools or profiles are active, report profile_ids, callable_tool_prefixes, shell_tool_aliases, and runtime_tool_status.',
+    'Do not say an MCP server is unavailable solely because one inferred tool name failed.',
+    ...runtimeStatusLines,
     '</active_tool_access>',
     '',
-  ].join('\n');
+    ].join('\n'),
+    runtimeStatuses,
+  };
 }
 
 /**
@@ -754,6 +1041,7 @@ async function runQuery(
   mcpServerPath: string,
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
+  toolRuntimeStatuses: ToolRuntimeStatus[],
   resumeAt?: string,
 ): Promise<{
   newSessionId?: string;
@@ -815,6 +1103,12 @@ async function runQuery(
 
   const allowedToolProfiles = getAllowedToolProfiles(containerInput);
   ensureLegacyToolHomes(allowedToolProfiles);
+  const singleProfileAliases = getSingleProfileToolAliases(allowedToolProfiles);
+  if (singleProfileAliases.has('gws')) {
+    sdkEnv.GOOGLE_WORKSPACE_CLI_CONFIG_DIR = '/home/node/.config/gws';
+    sdkEnv.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE =
+      '/home/node/.config/gws/credentials.json';
+  }
   const shellToolAliasDir = ensureShellToolAliases(allowedToolProfiles);
   if (shellToolAliasDir) {
     sdkEnv.PATH = `${shellToolAliasDir}:${sdkEnv.PATH || ''}`;
@@ -825,12 +1119,12 @@ async function runQuery(
       return config ? [[profile.serverName, config]] : [];
     }),
   );
-  const allowedToolPatterns = new Set<string>(
-    allowedToolProfiles.map((profile) => `mcp__${profile.serverName}__*`),
-  );
-  for (const [tool, profile] of getSingleProfileToolAliases(
-    allowedToolProfiles,
-  )) {
+  const allowedToolPatterns = new Set<string>();
+  for (const profile of allowedToolProfiles) {
+    if (!buildProfileMcpServerConfig(profile)) continue;
+    allowedToolPatterns.add(`mcp__${profile.serverName}__*`);
+  }
+  for (const [tool, profile] of singleProfileAliases) {
     const config = buildProfileMcpServerConfig(profile);
     if (!config) continue;
     allowedToolPatterns.add(`mcp__${tool}__*`);
@@ -944,6 +1238,7 @@ async function runQuery(
         status: 'success',
         result: textResult || null,
         newSessionId,
+        toolRuntimeStatuses,
       });
       // End the stream after each result so the query finishes cleanly.
       // The main loop will restart runQuery() for the next message, giving
@@ -1049,7 +1344,9 @@ async function main(): Promise<void> {
 
   // Build initial prompt (drain any pending IPC messages too)
   let promptText = containerInput.prompt;
-  promptText = buildToolAccessContext(containerInput) + promptText;
+  const toolAccessContext = await buildToolAccessContext(containerInput, sdkEnv);
+  const runtimeToolStatuses = toolAccessContext.runtimeStatuses;
+  promptText = toolAccessContext.promptPrefix + promptText;
   if (containerInput.isScheduledTask) {
     promptText = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${promptText}`;
   }
@@ -1077,6 +1374,7 @@ async function main(): Promise<void> {
       writeOutput({
         status: 'success',
         result: null,
+        toolRuntimeStatuses: runtimeToolStatuses,
       });
       return;
     }
@@ -1100,6 +1398,7 @@ async function main(): Promise<void> {
         mcpServerPath,
         containerInput,
         sdkEnv,
+        runtimeToolStatuses,
         resumeAt,
       );
       if (queryResult.newSessionId) {
@@ -1118,7 +1417,12 @@ async function main(): Promise<void> {
       }
 
       // Emit session update so host can track it
-      writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+      writeOutput({
+        status: 'success',
+        result: null,
+        newSessionId: sessionId,
+        toolRuntimeStatuses: runtimeToolStatuses,
+      });
 
       log('Query ended, waiting for next IPC message...');
 
@@ -1140,6 +1444,7 @@ async function main(): Promise<void> {
       result: null,
       newSessionId: sessionId,
       error: errorMessage,
+      toolRuntimeStatuses: runtimeToolStatuses,
     });
     process.exit(1);
   }

@@ -1,10 +1,14 @@
 import fs from 'fs';
+import type { Server } from 'http';
 import path from 'path';
 
 import { OneCLI } from '@onecli-sh/sdk';
+import { startCredentialProxy } from './credential-proxy.js';
 
 import {
   ASSISTANT_NAME,
+  CREDENTIAL_PROXY_HOST,
+  CREDENTIAL_PROXY_PORT,
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
@@ -50,6 +54,14 @@ import { startIpcWatcher } from './ipc.js';
 import { initBotPool } from './channels/telegram.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
+  createRunId,
+  detectAuthIssueClaims,
+  emitObservabilityEvent,
+  initObservability,
+  redactText,
+  shutdownObservability,
+} from './observability.js';
+import {
   restoreRemoteControl,
   startRemoteControl,
   stopRemoteControl,
@@ -80,6 +92,7 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+let credentialProxyServer: Server | null = null;
 
 // In-memory cache for image attachments (not persisted to DB).
 // Populated by onMessage; consumed when building the container prompt.
@@ -237,6 +250,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   const prompt = formatMessages(missedMessages, TIMEZONE);
+  const runId = createRunId('chat');
+  const sessionIdBefore = sessions[group.folder];
 
   // Collect and consume any pending images for this batch
   const batchImages = missedMessages.flatMap(
@@ -255,6 +270,33 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     { group: group.name, messageCount: missedMessages.length },
     'Processing messages',
   );
+  emitObservabilityEvent({
+    eventType: 'run.started',
+    runId,
+    groupFolder: group.folder,
+    chatJid,
+    sessionIdBefore,
+    payload: {
+      source: 'chat',
+      messageCount: missedMessages.length,
+      prompt: redactText(prompt),
+      imageCount: batchImages.length,
+    },
+    redactionMeta: {
+      redactedFields: ['payload.prompt.preview'],
+      hashedFields: ['payload.prompt.hash'],
+    },
+  });
+  if (sessionIdBefore) {
+    emitObservabilityEvent({
+      eventType: 'session.resumed',
+      runId,
+      groupFolder: group.folder,
+      chatJid,
+      sessionIdBefore,
+      payload: { source: 'chat' },
+    });
+  }
 
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -273,12 +315,29 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  const emittedRuntimeStatuses = new Set<string>();
 
   const output = await runAgent(
     group,
+    runId,
     prompt,
     chatJid,
     async (result) => {
+      if (result.toolRuntimeStatuses?.length) {
+        for (const status of result.toolRuntimeStatuses) {
+          const key = `${status.profileId}:${status.auth}:${status.source}`;
+          if (emittedRuntimeStatuses.has(key)) continue;
+          emittedRuntimeStatuses.add(key);
+          emitObservabilityEvent({
+            eventType: 'tool.runtime_status',
+            severity: status.auth === 'working' ? 'info' : 'warn',
+            runId,
+            groupFolder: group.folder,
+            chatJid,
+            payload: { ...status },
+          });
+        }
+      }
       // Streaming output callback — called for each agent result
       if (result.result) {
         const raw =
@@ -292,6 +351,54 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           `Agent output: ${raw.slice(0, 200)}`,
         );
         if (text) {
+          const authClaims = result.toolRuntimeStatuses?.length
+            ? detectAuthIssueClaims(text, result.toolRuntimeStatuses)
+            : [];
+          for (const claim of authClaims) {
+            emitObservabilityEvent({
+              eventType: 'agent.claim.auth_issue',
+              severity: 'warn',
+              runId,
+              groupFolder: group.folder,
+              chatJid,
+              payload: {
+                tool: claim.tool,
+                profileId: claim.profileId,
+                text: redactText(claim.text),
+              },
+              redactionMeta: {
+                redactedFields: ['payload.text.preview'],
+                hashedFields: ['payload.text.hash'],
+              },
+            });
+            const status = result.toolRuntimeStatuses?.find(
+              (candidate) =>
+                candidate.profileId === claim.profileId &&
+                candidate.auth === 'working',
+            );
+            if (status) {
+              emitObservabilityEvent(
+                {
+                  eventType: 'tool.auth_contradiction_detected',
+                  severity: 'warn',
+                  runId,
+                  groupFolder: group.folder,
+                  chatJid,
+                  payload: {
+                    tool: status.tool,
+                    profileId: status.profileId,
+                    runtimeStatus: status.auth,
+                    claimText: redactText(claim.text),
+                  },
+                  redactionMeta: {
+                    redactedFields: ['payload.claimText.preview'],
+                    hashedFields: ['payload.claimText.hash'],
+                  },
+                },
+                { syncImmediately: true },
+              );
+            }
+          }
           // Two supported reply-to forms:
           //   Wrapping:     <reply-to id="...">content</reply-to>  → inner content only
           //   Self-closing: <reply-to id="..."/>                   → strip tag, use rest
@@ -317,6 +424,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             await channel.sendMessage(chatJid, text);
             outputSentToUser = true;
           }
+          emitObservabilityEvent({
+            eventType: 'message.outbound',
+            runId,
+            groupFolder: group.folder,
+            chatJid,
+            payload: {
+              text: redactText(text),
+            },
+            redactionMeta: {
+              redactedFields: ['payload.text.preview'],
+              hashedFields: ['payload.text.hash'],
+            },
+          });
         }
         // Only reset idle timer on actual results, not session-update markers (result: null)
         resetIdleTimer();
@@ -337,6 +457,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
+    emitObservabilityEvent(
+      {
+        eventType: 'run.failed',
+        severity: 'error',
+        runId,
+        groupFolder: group.folder,
+        chatJid,
+        sessionIdBefore,
+        sessionIdAfter: sessions[group.folder],
+        payload: {
+          source: 'chat',
+          outputSentToUser,
+        },
+      },
+      { syncImmediately: true },
+    );
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
@@ -356,11 +492,25 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return false;
   }
 
+  emitObservabilityEvent({
+    eventType: 'run.completed',
+    runId,
+    groupFolder: group.folder,
+    chatJid,
+    sessionIdBefore,
+    sessionIdAfter: sessions[group.folder],
+    payload: {
+      source: 'chat',
+      outputSentToUser,
+    },
+  });
+
   return true;
 }
 
 async function runAgent(
   group: RegisteredGroup,
+  runId: string,
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
@@ -395,11 +545,31 @@ async function runAgent(
   );
 
   // Wrap onOutput to track session ID from streamed results
+  let sessionEventEmitted = false;
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
+          const previousSessionId = sessions[group.folder];
           sessions[group.folder] = output.newSessionId;
           setSession(group.folder, output.newSessionId);
+          if (
+            previousSessionId !== output.newSessionId &&
+            !sessionEventEmitted
+          ) {
+            sessionEventEmitted = true;
+            emitObservabilityEvent({
+              eventType: 'session.created',
+              runId,
+              groupFolder: group.folder,
+              chatJid,
+              sessionIdBefore: previousSessionId,
+              sessionIdAfter: output.newSessionId,
+              payload: {
+                source: 'chat',
+                replacedExistingSession: !!previousSessionId,
+              },
+            });
+          }
         }
         await onOutput(output);
       }
@@ -409,6 +579,7 @@ async function runAgent(
     const output = await runContainerAgent(
       group,
       {
+        runId,
         prompt,
         sessionId,
         groupFolder: group.folder,
@@ -424,8 +595,27 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
+      const previousSessionId = sessions[group.folder];
       sessions[group.folder] = output.newSessionId;
       setSession(group.folder, output.newSessionId);
+      if (
+        previousSessionId !== output.newSessionId &&
+        !sessionEventEmitted
+      ) {
+        sessionEventEmitted = true;
+        emitObservabilityEvent({
+          eventType: 'session.created',
+          runId,
+          groupFolder: group.folder,
+          chatJid,
+          sessionIdBefore: previousSessionId,
+          sessionIdAfter: output.newSessionId,
+          payload: {
+            source: 'chat',
+            replacedExistingSession: !!previousSessionId,
+          },
+        });
+      }
     }
 
     if (output.status === 'error') {
@@ -582,7 +772,12 @@ async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
+  initObservability();
   loadState();
+  credentialProxyServer = await startCredentialProxy(
+    CREDENTIAL_PROXY_PORT,
+    CREDENTIAL_PROXY_HOST,
+  );
 
   // Ensure OneCLI agents exist for all registered groups.
   // Recovers from missed creates (e.g. OneCLI was down at registration time).
@@ -597,6 +792,11 @@ async function main(): Promise<void> {
     logger.info({ signal }, 'Shutdown signal received');
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
+    await new Promise<void>((resolve) => {
+      if (!credentialProxyServer) return resolve();
+      credentialProxyServer.close(() => resolve());
+    });
+    await shutdownObservability();
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -673,6 +873,23 @@ async function main(): Promise<void> {
         }
       }
       storeMessage(msg);
+      emitObservabilityEvent({
+        eventType: 'message.inbound',
+        groupFolder: registeredGroups[chatJid]?.folder,
+        chatJid,
+        payload: {
+          sender: msg.sender,
+          senderName: msg.sender_name,
+          text: redactText(msg.content),
+          isFromMe: msg.is_from_me === true,
+          isBotMessage: msg.is_bot_message === true,
+          imageCount: msg.images?.length || 0,
+        },
+        redactionMeta: {
+          redactedFields: ['payload.text.preview'],
+          hashedFields: ['payload.text.hash'],
+        },
+      });
       // Cache images in memory so processGroupMessages can pick them up
       if (msg.images?.length) {
         pendingImages.set(msg.id, msg.images);

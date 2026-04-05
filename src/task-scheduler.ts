@@ -19,6 +19,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { createRunId, emitObservabilityEvent, redactText } from './observability.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
@@ -80,6 +81,7 @@ async function runTask(
   deps: SchedulerDependencies,
 ): Promise<void> {
   const startTime = Date.now();
+  const runId = createRunId('task');
   let groupDir: string;
   try {
     groupDir = resolveGroupFolderPath(task.group_folder);
@@ -154,12 +156,54 @@ async function runTask(
   const sessions = deps.getSessions();
   const sessionId =
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
+  emitObservabilityEvent({
+    eventType: 'task.started',
+    runId,
+    groupFolder: task.group_folder,
+    chatJid: task.chat_jid,
+    sessionIdBefore: sessionId,
+    payload: {
+      taskId: task.id,
+      contextMode: task.context_mode,
+      prompt: redactText(task.prompt),
+    },
+    redactionMeta: {
+      redactedFields: ['payload.prompt.preview'],
+      hashedFields: ['payload.prompt.hash'],
+    },
+  });
+  emitObservabilityEvent({
+    eventType: 'run.started',
+    runId,
+    groupFolder: task.group_folder,
+    chatJid: task.chat_jid,
+    sessionIdBefore: sessionId,
+    payload: {
+      source: 'scheduled_task',
+      taskId: task.id,
+      contextMode: task.context_mode,
+    },
+  });
+  if (sessionId) {
+    emitObservabilityEvent({
+      eventType: 'session.resumed',
+      runId,
+      groupFolder: task.group_folder,
+      chatJid: task.chat_jid,
+      sessionIdBefore: sessionId,
+      payload: {
+        source: 'scheduled_task',
+        taskId: task.id,
+      },
+    });
+  }
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
   // query loop to time out. A short delay handles any final MCP calls.
   const TASK_CLOSE_DELAY_MS = 10000;
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
+  const emittedRuntimeStatuses = new Set<string>();
 
   const scheduleClose = () => {
     if (closeTimer) return; // already scheduled
@@ -173,6 +217,7 @@ async function runTask(
     const output = await runContainerAgent(
       group,
       {
+        runId,
         prompt: task.prompt,
         sessionId,
         groupFolder: task.group_folder,
@@ -186,6 +231,21 @@ async function runTask(
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
+        if (streamedOutput.toolRuntimeStatuses?.length) {
+          for (const status of streamedOutput.toolRuntimeStatuses) {
+            const key = `${status.profileId}:${status.auth}:${status.source}`;
+            if (emittedRuntimeStatuses.has(key)) continue;
+            emittedRuntimeStatuses.add(key);
+            emitObservabilityEvent({
+              eventType: 'tool.runtime_status',
+              severity: status.auth === 'working' ? 'info' : 'warn',
+              runId,
+              groupFolder: task.group_folder,
+              chatJid: task.chat_jid,
+              payload: { ...status },
+            });
+          }
+        }
         if (streamedOutput.result) {
           result = streamedOutput.result;
           // Forward result to user (sendMessage handles formatting)
@@ -239,6 +299,69 @@ async function runTask(
       ? result.slice(0, 200)
       : 'Completed';
   updateTaskAfterRun(task.id, nextRun, resultSummary);
+  if (error) {
+    emitObservabilityEvent(
+      {
+        eventType: 'task.failed',
+        severity: 'error',
+        runId,
+        groupFolder: task.group_folder,
+        chatJid: task.chat_jid,
+        sessionIdBefore: sessionId,
+        payload: {
+          taskId: task.id,
+          durationMs,
+          error,
+        },
+      },
+      { syncImmediately: true },
+    );
+    emitObservabilityEvent(
+      {
+        eventType: 'run.failed',
+        severity: 'error',
+        runId,
+        groupFolder: task.group_folder,
+        chatJid: task.chat_jid,
+        sessionIdBefore: sessionId,
+        payload: {
+          source: 'scheduled_task',
+          taskId: task.id,
+          durationMs,
+          error,
+        },
+      },
+      { syncImmediately: true },
+    );
+    return;
+  }
+
+  emitObservabilityEvent({
+    eventType: 'task.completed',
+    runId,
+    groupFolder: task.group_folder,
+    chatJid: task.chat_jid,
+    sessionIdBefore: sessionId,
+    payload: {
+      taskId: task.id,
+      durationMs,
+      nextRun,
+      hadResult: !!result,
+    },
+  });
+  emitObservabilityEvent({
+    eventType: 'run.completed',
+    runId,
+    groupFolder: task.group_folder,
+    chatJid: task.chat_jid,
+    sessionIdBefore: sessionId,
+    payload: {
+      source: 'scheduled_task',
+      taskId: task.id,
+      durationMs,
+      hadResult: !!result,
+    },
+  });
 }
 
 let schedulerRunning = false;

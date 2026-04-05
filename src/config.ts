@@ -8,7 +8,15 @@ import { isValidTimezone } from './timezone.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'CREDENTIAL_PROXY_HOST',
+  'CREDENTIAL_PROXY_PORT',
   'ONECLI_URL',
+  'OBSERVABILITY_API_TOKEN',
+  'OBSERVABILITY_ENABLED',
+  'OBSERVABILITY_FLUSH_INTERVAL_MS',
+  'OBSERVABILITY_INSTANCE_ID',
+  'OBSERVABILITY_MAX_BATCH_EVENTS',
+  'OBSERVABILITY_SYNC_URL',
   'TELEGRAM_BOT_POOL',
   'TZ',
   'GOOGLE_TASKS_CLIENT_ID',
@@ -49,6 +57,7 @@ export const TOOL_PROFILES_PATH = path.join(
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+export const OBSERVABILITY_DIR = path.join(DATA_DIR, 'observability');
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
@@ -62,6 +71,45 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
 ); // 10MB default
 export const ONECLI_URL =
   process.env.ONECLI_URL || envConfig.ONECLI_URL || 'http://localhost:10254';
+export const CREDENTIAL_PROXY_PORT = parseInt(
+  process.env.CREDENTIAL_PROXY_PORT ||
+    envConfig.CREDENTIAL_PROXY_PORT ||
+    '3001',
+  10,
+);
+export const CREDENTIAL_PROXY_HOST =
+  process.env.CREDENTIAL_PROXY_HOST ||
+  envConfig.CREDENTIAL_PROXY_HOST ||
+  '0.0.0.0';
+export const OBSERVABILITY_ENABLED =
+  (process.env.OBSERVABILITY_ENABLED ||
+    envConfig.OBSERVABILITY_ENABLED ||
+    'true') !== 'false';
+export const OBSERVABILITY_SYNC_URL =
+  process.env.OBSERVABILITY_SYNC_URL || envConfig.OBSERVABILITY_SYNC_URL || '';
+export const OBSERVABILITY_API_TOKEN =
+  process.env.OBSERVABILITY_API_TOKEN ||
+  envConfig.OBSERVABILITY_API_TOKEN ||
+  '';
+export const OBSERVABILITY_INSTANCE_ID =
+  process.env.OBSERVABILITY_INSTANCE_ID ||
+  envConfig.OBSERVABILITY_INSTANCE_ID ||
+  os.hostname();
+export const OBSERVABILITY_FLUSH_INTERVAL_MS = parseInt(
+  process.env.OBSERVABILITY_FLUSH_INTERVAL_MS ||
+    envConfig.OBSERVABILITY_FLUSH_INTERVAL_MS ||
+    '15000',
+  10,
+);
+export const OBSERVABILITY_MAX_BATCH_EVENTS = Math.max(
+  1,
+  parseInt(
+    process.env.OBSERVABILITY_MAX_BATCH_EVENTS ||
+      envConfig.OBSERVABILITY_MAX_BATCH_EVENTS ||
+      '100',
+    10,
+  ) || 100,
+);
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(

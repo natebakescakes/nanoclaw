@@ -1,4 +1,11 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  vi,
+  afterEach,
+} from 'vitest';
 import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
@@ -18,6 +25,13 @@ vi.mock('./config.js', () => ({
   GOOGLE_TASKS_CLIENT_SECRET: '',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
+  OBSERVABILITY_API_TOKEN: '',
+  OBSERVABILITY_DIR: '/tmp/nanoclaw-test-data/observability',
+  OBSERVABILITY_ENABLED: false,
+  OBSERVABILITY_FLUSH_INTERVAL_MS: 1000,
+  OBSERVABILITY_INSTANCE_ID: 'test-instance',
+  OBSERVABILITY_MAX_BATCH_EVENTS: 100,
+  OBSERVABILITY_SYNC_URL: '',
   ONECLI_URL: 'http://localhost:10254',
   TIMEZONE: 'America/Los_Angeles',
   TOOL_PROFILES_PATH: '/tmp/nanoclaw-tool-profiles.json',
@@ -114,8 +128,28 @@ vi.mock('./tool-profiles.js', () => ({
         ],
       });
     }
+    if ((perms.mcpServerProfiles ?? []).includes('notion:multiplier')) {
+      profiles.push({
+        profileId: 'notion:multiplier',
+        tool: 'notion',
+        serverName: 'notion__multiplier',
+        homeDir: '/home/node/.nanoclaw/tool-profiles/notion_multiplier',
+        mounts: [
+          {
+            hostPath: '/tmp/home/.notion-mcp-auth-multiplier',
+            containerPath:
+              '/home/node/.nanoclaw/tool-profiles/notion_multiplier/.mcp-auth',
+            readonly: false,
+          },
+        ],
+      });
+    }
     return profiles;
   }),
+}));
+
+vi.mock('./notion-auth.js', () => ({
+  refreshOauthProfileTokens: vi.fn(async () => {}),
 }));
 
 // Mock OneCLI SDK
@@ -170,6 +204,9 @@ import {
   ContainerOutput,
 } from './container-runner.js';
 import { readEnvFile } from './env.js';
+import { validateAdditionalMounts } from './mount-security.js';
+import { resolveToolProfiles } from './tool-profiles.js';
+import { refreshOauthProfileTokens } from './notion-auth.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -403,6 +440,57 @@ describe('container-runner tool profiles', () => {
       ),
     ).toBe(true);
   });
+
+  it('uses input tool permissions when resolving task container profiles', async () => {
+    const group: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: {
+        toolPermissions: {
+          mcpServers: ['slack'],
+        },
+      },
+    };
+
+    const input = {
+      ...testInput,
+      toolPermissions: {
+        mcpServers: ['gws'],
+      },
+    };
+
+    const resultPromise = runContainerAgent(group, input, () => {});
+    expect(resolveToolProfiles).toHaveBeenCalledWith(
+      false,
+      { mcpServers: ['gws'] },
+      expect.any(Object),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fakeProc.emit('close', 0);
+    await resultPromise;
+  });
+
+  it('refreshes OAuth-backed profile tokens before spawning the container', async () => {
+    const input = {
+      ...testInput,
+      toolPermissions: {
+        mcpServerProfiles: ['notion:multiplier'],
+      },
+    };
+
+    const resultPromise = runContainerAgent(testGroup, input, () => {});
+
+    expect(refreshOauthProfileTokens).toHaveBeenCalledWith([
+      expect.objectContaining({
+        profileId: 'notion:multiplier',
+        tool: 'notion',
+      }),
+    ]);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fakeProc.emit('close', 0);
+    await resultPromise;
+  });
 });
 
 describe('container-runner bundled skills', () => {
@@ -446,6 +534,61 @@ describe('container-runner bundled skills', () => {
           m.hostPath ===
             '/tmp/nanoclaw-test-data/sessions/test-group/.codex/skills' &&
           m.containerPath === '/home/node/.codex/skills',
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('container-runner project alias mounts', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fakeProc = createFakeProcess();
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p) =>
+        p === '/home/developer/nanoclaw/container/skills' ||
+        p === '/home/developer/nanoclaw/.env',
+    );
+    vi.mocked(fs.readdirSync).mockReturnValue([] as any);
+    vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => false } as any);
+    vi.mocked(validateAdditionalMounts).mockReturnValue([
+      {
+        hostPath: '/home/developer/nanoclaw',
+        containerPath: '/workspace/extra/nanoclaw',
+        readonly: true,
+      },
+    ]);
+  });
+
+  it('aliases an explicitly mounted repo root to /workspace/project for non-main groups', () => {
+    const group: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: {
+        additionalMounts: [
+          {
+            hostPath: '/home/developer/nanoclaw',
+            containerPath: 'nanoclaw',
+            readonly: true,
+          },
+        ],
+      },
+    };
+
+    const mounts = buildVolumeMounts(group, false);
+
+    expect(
+      mounts.some(
+        (m) =>
+          m.hostPath === '/home/developer/nanoclaw' &&
+          m.containerPath === '/workspace/project' &&
+          m.readonly,
+      ),
+    ).toBe(true);
+    expect(
+      mounts.some(
+        (m) =>
+          m.hostPath === '/dev/null' &&
+          m.containerPath === '/workspace/project/.env' &&
+          m.readonly,
       ),
     ).toBe(true);
   });

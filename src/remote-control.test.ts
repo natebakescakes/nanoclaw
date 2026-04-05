@@ -4,6 +4,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 // Mock config before importing the module under test
 vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-rc-test',
+  OBSERVABILITY_API_TOKEN: '',
+  OBSERVABILITY_DIR: '/tmp/nanoclaw-rc-test/observability',
+  OBSERVABILITY_ENABLED: false,
+  OBSERVABILITY_FLUSH_INTERVAL_MS: 1000,
+  OBSERVABILITY_INSTANCE_ID: 'test-instance',
+  OBSERVABILITY_MAX_BATCH_EVENTS: 100,
+  OBSERVABILITY_SYNC_URL: '',
 }));
 
 // Mock child_process
